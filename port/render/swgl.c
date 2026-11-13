@@ -816,8 +816,25 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         uint8_t *row = t->c + (size_t)py * t->w * 4;
         uint32_t *zrow = do_z ? t->z + (size_t)py * t->w : 0;
         float z = 0.f, iw = 0.f, var[NVAR];
-        int started = 0;
-        for (int px = minx; px <= maxx; px++, e0 += A0 * 256, e1 += A1 * 256, e2 += A2 * 256) {
+        int started = 0, xs = minx, xe = maxx;
+        /* the pixels of this row where every edge function is >= 0 */
+        {
+            const int64_t ev[3] = { e0, e1, e2 }, av[3] = { A0 * 256, A1 * 256, A2 * 256 };
+            int empty = 0;
+            for (int k = 0; k < 3; k++) {
+                if (av[k] > 0) {
+                    if (ev[k] < 0) { int64_t n = (-ev[k] + av[k] - 1) / av[k]; if (minx + n > xs) xs = n > maxx - minx ? maxx + 1 : (int)(minx + n); }
+                } else if (av[k] < 0) {
+                    if (ev[k] < 0) empty = 1;
+                    else { int64_t n = ev[k] / -av[k]; if (minx + n < xe) xe = (int)(minx + n); }
+                } else if (ev[k] < 0) {
+                    empty = 1;
+                }
+            }
+            if (empty || xs > xe) continue;
+            e0 += A0 * 256 * (xs - minx); e1 += A1 * 256 * (xs - minx); e2 += A2 * 256 * (xs - minx);
+        }
+        for (int px = xs; px <= xe; px++, e0 += A0 * 256, e1 += A1 * 256, e2 += A2 * 256) {
             uint32_t zi = 0;
             uint8_t out[4];
             float u, v;
