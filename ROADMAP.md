@@ -1,5 +1,15 @@
 # Roadmap: the universal port
 
+> **Status: parked (owner decision, 2026-11-13).** The browser port
+> ([port/](port), [USER_GUIDE.md](port/docs/USER_GUIDE.md)) is what people
+> play: a link, your own disc, a phone or a computer. The universal build
+> below works and is kept as it is, but it is not being developed further.
+> It serves devices with no modern browser or GPU, which is a small
+> audience, and it cannot remove the need for each player's own disc. If
+> work resumes, "Order of work" at the end is where to start. The feature
+> players would notice most is online play with rollback
+> ([PORT_PLAN.md](port/docs/PORT_PLAN.md), phase 5).
+
 ## The goal
 
 One file that is *Marvel vs. Capcom 2*, and a handful of functions per
@@ -58,8 +68,9 @@ Open against "arcade identical":
 | The game's own code running natively ([port/](port)) | Done: playable end to end, verified against the retail PS2 game over 1.1 million fuzzed frames |
 | One module with a five-function host ([port/generic](port/generic/README.md)) | Working: picture, sound and buttons; the plain-C translation matches the wasm frame for frame |
 | No GPU needed ([SWGL.md](port/docs/SWGL.md)) | Working: 99.9% of fight pixels within 2 levels of the GL renderer |
-| 60 fps in the translated build | Not yet: fight frames take 23.3 ms (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
-| Other CPUs (arm64, big-endian) | Not started |
+| 60 fps in the translated build | Not yet: fight frames take 20.4 ms on a 2.1 GHz server vCPU (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
+| Other CPUs | arm64 and big-endian s390x builds of the translated C give the same 1200 state hashes as the wasm, under emulation. No real device yet |
+| A playable native host (SDL2, no GL) | Working headless: holds 60 game steps a second through a fight by not drawing some frames. Not yet played by a person |
 | Personal build with the disc inside | Working (`EMBED=1`), for the disc's owner only |
 | A clean inside | Measured, not started (below) |
 
@@ -99,6 +110,32 @@ Limits of the measurement: functions, not branches; arcade mode only; player
 1 always the same team; the count of functions present is a floor (the
 optimiser merges small ones).
 
+**How regular the state code is** (`port/tools/state_code_survey.py`, from
+the credited C of the 15,493 functions in 0x191000 to 0x3D0000, 2026-11-13):
+
+| Shape | Share |
+|---|---|
+| Table dispatch head (`jtbl[p[n]](p)`) | 15.4% |
+| Empty or constant return | 1.5% |
+| 1 to 4 statements | 22.8% |
+| 5 to 12 statements | 29.2% |
+| 13 to 40 statements | 25.5% |
+| Over 40 statements | 2.0% |
+| Source not located by the survey | 3.7% |
+
+- Median 6 statements per function.
+- 30,520 call sites. The ten most called functions take 46% of them and the
+  top 25 take 60%. 142 engine functions account for 68% of all call sites.
+- The two most called are the animation step (`func_00175700`, 4,796 sites)
+  and the animation start (`func_001757E0`, 3,978).
+
+So the per-character code is close to a script already: states selected
+through tables, each a few calls to about 150 engine primitives with
+constant arguments, and increments of state bytes. That is what makes a
+mechanical conversion to a table or bytecode plausible. Not yet examined:
+what the statements between the calls do (the survey counts them, it does
+not classify them), and the 2% of large functions.
+
 **Proof.** A proof assistant fits the small pure pieces (fixed-point math,
 the damage formula, the input buffer, the animation-script interpreter) and
 the specification of the tiny machine. For most functions the cheaper tools
@@ -108,7 +145,8 @@ checking of one C function against another.
 ## Order of work
 
 1. 60 fps in the translated build.
-2. arm64 and a big-endian build, same hash comparison.
+2. ~~arm64 and a big-endian build, same hash comparison.~~ Done under
+   emulation (2026-11-13). Next: a real device, and a 32-bit target.
 3. Widen the fuzzer (other modes, all characters) and record coverage per
    character.
 4. Classify the per-character state functions; try a mechanical conversion on

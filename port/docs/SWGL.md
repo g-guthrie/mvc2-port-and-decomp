@@ -89,11 +89,40 @@ Drawing per frame, i386 desktop build, `arcade_fight.txt`:
 | 32-bit blend, fog and floor | 16.9 |
 | Scalar-only inner loop | 16.3 |
 
+(The last two rows and everything after were measured after a machine
+restart that changed its speed; compare within the instruction-count table
+below, not with this one.)
+
 Those are means over the whole script, of which 1,450 frames are boot and
 menus. **Fight frames alone** (`MVC2_SWGL_STATS=1890`, 400 frames) take 20.0
 ms on i386, and 21.8 ms in the translated x86-64 build
 (`mvc2g_native --fuzz 3 --time-from 1900`, less the 1.5 ms game step). 60 fps
 needs the whole frame under 16.7 ms.
+
+**Measuring it.** Wall-clock time on a shared machine varies by about 8%
+from run to run, so changes are judged by instruction counts (valgrind's
+callgrind), which are exact and repeatable:
+
+```sh
+# desktop app: instructions inside the draw calls of 60 fight frames
+MVC2_SWGL=1 MVC2_SWGL_STATS=1890 MVC2_SWGL_STOP=60 SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy \
+  valgrind --tool=callgrind --collect-atstart=no --toggle-collect=draw ./build/port-i386/mvc2 --hidden \
+  --size 640x480 --shot-dir OUT --script port/tools/scripts/arcade_fight.txt DISC
+# universal build: the same 2000 steps with frames 1900..1999 drawn, and with none drawn
+valgrind --tool=callgrind ./mvc2g_native DISC 2000 --fuzz 3 --draw-from 1900
+valgrind --tool=callgrind ./mvc2g_native DISC 2000 --fuzz 3 --nodraw
+```
+
+| Build | Measure | Result (2026-11-13) |
+|---|---|---|
+| i386 desktop, 60 fight frames | before the depth-test and rounding change | 18.21 billion instructions |
+| | after | 15.76 billion (13.5% fewer) |
+| translated x86-64, 100 fight frames | drawn minus not drawn | 45.84 - 18.97 = 26.87 billion, 269 million per frame |
+| translated x86-64, fight frames, wall clock | whole frame | 20.4 ms (was 23.3) |
+
+A fight frame is about 65,000 spans in 108,000 pieces; 926,000 pixels are
+visited, of which 319,000 fail the depth test and 547,000 are written
+(450,000 of them bilinear).
 
 A fight frame is about 5,000 triangles, 68,000 sprite fragments and 540,000
 stage-mesh fragments (bilinear, palette). The rasteriser is nearly all of the

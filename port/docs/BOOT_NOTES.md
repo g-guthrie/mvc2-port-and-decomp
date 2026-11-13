@@ -1107,3 +1107,24 @@ and the game's byte copy / memmove had no C (empty stubs: now
 bytes; wrapped-cast table calls without their register arguments
 (`wave13b.c`, `owner_state_copy_setup_0019a560.c`); `n5.c`'s handler call
 gets the object just allocated.  Details: ORACLE_FUZZ.md "Second pass".
+
+### Browser check with a raw .bin disc (2026-11-13)
+
+Emscripten 6.0.13 build of `main` plus the raw-sector reader (`fs.c`
+`raw_wrap`), headless Chromium (Playwright, SwiftShader), disc served on
+localhost and loaded with `?disc=`:
+
+- `port/tools/web_script.js` with `arcade_fight.txt`: title, character
+  select, versus and the fight, script done at frame 2290 in 77 s, no page
+  error. The disc was a raw 2352-byte `.bin`; before this the page (like
+  the desktop app) only read a 2048-byte `.iso`.
+- Screenshots against the desktop GL build (Mesa): 94.8 to 99.9% of pixels
+  within 2 levels. The two are different GL implementations; the picture is
+  the same to the eye.
+- Emulated iPhone 13, portrait and landscape: the game runs and the touch
+  pad appears after the first touch; no page error.
+- `web_script.js` now accepts a URL that already has a query (`?disc=...`).
+
+Not checked: a real phone, sound in the browser, a 2048-byte `.iso` after
+the change (the reader looks for the `.iso` layout first and leaves it
+alone).

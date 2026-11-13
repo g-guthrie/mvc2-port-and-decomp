@@ -169,7 +169,7 @@ static uint32_t depth24(float z) { return z <= 0.f ? 0 : z >= 1.f ? 0xFFFFFFu : 
 
 /* MVC2_SWGL_STATS=N (testing): draw nothing before canvas frame N, then time
  * the draw calls and print the mean per frame at exit. */
-static struct { long frame, from, frames; double sec, vsec; int on; long long visited, fb, fm, tris, verts; } St;
+static struct { long frame, from, frames, stop; double sec, vsec; int on; long long visited, fb, fm, tris, verts; } St;
 static double now_sec(void)
 {
     struct timespec ts;
@@ -192,6 +192,7 @@ static void GL_APIENTRY sw_glClear(GLbitfield mask)
     if (G.fbo && (mask & GL_COLOR_BUFFER_BIT)) {
         St.frame++;
         if (St.on && St.frame > St.from) St.frames++;
+        if (St.on && St.stop && St.frames > St.stop) { St.frames = St.stop; exit(0); } /* MVC2_SWGL_STOP */
     }
     if (!t.c) return;
     bounds(&t, &x0, &y0, &x1, &y1);
@@ -764,6 +765,11 @@ static inline uint8_t round16(int32_t v) /* 8.8 -> 8 bits, clamped */
     return v <= 0 ? 0 : v >= (int32_t)ONE16 ? 255 : (uint8_t)((v + 128) >> 8);
 }
 
+static inline uint8_t round16u(int32_t v) /* the same for a value known to be in 0..ONE16 */
+{
+    return (uint8_t)((uint32_t)(v + 128) >> 8);
+}
+
 /* 8.8 (0..ONE16) -> a 15-bit weight (0..32768), so weight * 8.8 fits in 32 bits */
 static inline int32_t weight15(uint32_t v) { return (int32_t)((v * 32897u) >> 16); }
 
@@ -771,17 +777,17 @@ static inline void write_pixel(uint8_t *p, uint32_t s0, uint32_t s1, uint32_t s2
 {
     if (allmask) {
         if (bl == BL_OFF) {
-            p[0] = round16((int32_t)s0); p[1] = round16((int32_t)s1);
-            p[2] = round16((int32_t)s2); p[3] = round16((int32_t)s3);
+            p[0] = round16u((int32_t)s0); p[1] = round16u((int32_t)s1);
+            p[2] = round16u((int32_t)s2); p[3] = round16u((int32_t)s3);
             return;
         }
-        if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) = d + (s - d) * sa */
+        if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) = d + (s - d) * sa: between d and s */
             const int32_t a = weight15(s3);
             const int32_t d0 = (int32_t)p[0] << 8, d1 = (int32_t)p[1] << 8, d2 = (int32_t)p[2] << 8, d3 = (int32_t)p[3] << 8;
-            p[0] = round16(d0 + ((((int32_t)s0 - d0) * a + 16384) >> 15));
-            p[1] = round16(d1 + ((((int32_t)s1 - d1) * a + 16384) >> 15));
-            p[2] = round16(d2 + ((((int32_t)s2 - d2) * a + 16384) >> 15));
-            p[3] = round16(d3 + ((((int32_t)s3 - d3) * a + 16384) >> 15));
+            p[0] = round16u(d0 + ((((int32_t)s0 - d0) * a + 16384) >> 15));
+            p[1] = round16u(d1 + ((((int32_t)s1 - d1) * a + 16384) >> 15));
+            p[2] = round16u(d2 + ((((int32_t)s2 - d2) * a + 16384) >> 15));
+            p[3] = round16u(d3 + ((((int32_t)s3 - d3) * a + 16384) >> 15));
             return;
         }
         if (bl == BL_ADD) {
@@ -862,6 +868,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     const int ui = batch ? 0 : 1, ci = batch ? 2 : 3;
     const int do_z = t->z && G.depth, zwrite = do_z && G.zmask;
     const GLenum zf = G.zfunc;
+    const int zfast = zf == GL_GEQUAL || zf == GL_GREATER, zgt = zf == GL_GREATER;
     const int allmask = G.cmask[0] & G.cmask[1] & G.cmask[2] & G.cmask[3];
     const int bl = !G.blend ? BL_OFF
                  : G.bl_eq != GL_FUNC_ADD ? BL_GEN
@@ -870,7 +877,8 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                  : G.bl_s == GL_ONE && G.bl_d == GL_ZERO ? BL_OFF : BL_GEN;
     const int fogged = !batch && (fc->flags & 16);
     float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep, tw = 1.f, th = 1.f, half = 0.f;
-    int affine, constcol, white = 0;
+    int affine, constcol, white = 0, flat_uv = 0, lin_uv;
+    float base[NVAR];
     uint32_t cc16[4] = { ONE16, ONE16, ONE16, ONE16 }; /* vertex colour, 8.8 */
     uint32_t q0, q1, q2, q3;
     const int32_t fog0 = (int32_t)fc->fog8[0] << 8, fog1 = (int32_t)fc->fog8[1] << 8, fog2 = (int32_t)fc->fog8[2] << 8;
@@ -878,6 +886,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     int tex_on, lin, tcs, tct, txw = 1, txh = 1, tbpp = 4;
     Samp sp;
     if (area == 0) return;
+    if (do_z && zf == GL_NEVER) return;
     if (!batch && (a->v[0] > 0.f || b->v[0] > 0.f || c->v[0] > 0.f)) return; /* ADC: the GS skips this triangle */
     if (area < 0) { /* make it counter-clockwise in the y-up frame */
         int64_t tx = x1, ty = y1;
@@ -924,6 +933,43 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     diw1 = s1->iw - s0->iw; diw2 = s2->iw - s0->iw; iwstep = GRAD(diw1, diw2);
 #undef GRAD
     affine = diw1 == 0.f && diw2 == 0.f;
+    for (int k = 0; k < nvar; k++) base[k] = s0->v[k];
+    /* A small triangle far from the eye: if the exact texture coordinate at the
+     * middle of each edge and at the centre is within 1/64 texel of the straight
+     * line between the vertices, step u and v linearly over the whole triangle
+     * (no divide per row).  Most stage triangles are like this. */
+    if (!affine && sp.on) {
+        const float w[3] = { 1.f / s0->iw, 1.f / s1->iw, 1.f / s2->iw };
+        const SV *sv[3] = { s0, s1, s2 };
+        float uv[3][2], worst = 0.f;
+        for (int i = 0; i < 3; i++) { uv[i][0] = sv[i]->v[ui] * w[i]; uv[i][1] = sv[i]->v[ui + 1] * w[i]; }
+        for (int c = 0; c < 2; c++) {
+            const float scale = c ? th : tw;
+            for (int i = 0; i < 3; i++) {
+                const int j = (i + 1) % 3;
+                const float exact = (sv[i]->v[ui + c] + sv[j]->v[ui + c]) / (sv[i]->iw + sv[j]->iw);
+                const float e = (exact - (uv[i][c] + uv[j][c]) * 0.5f) * scale;
+                if (e > worst) worst = e;
+                if (-e > worst) worst = -e;
+            }
+            {
+                const float exact = (s0->v[ui + c] + s1->v[ui + c] + s2->v[ui + c]) / (s0->iw + s1->iw + s2->iw);
+                const float e = (exact - (uv[0][c] + uv[1][c] + uv[2][c]) * (1.f / 3.f)) * scale;
+                if (e > worst) worst = e;
+                if (-e > worst) worst = -e;
+            }
+        }
+        if (worst < 1.f / 64.f) {
+            flat_uv = 1;
+            for (int c = 0; c < 2; c++) {
+                base[ui + c] = uv[0][c];
+                d1[ui + c] = uv[1][c] - uv[0][c];
+                d2[ui + c] = uv[2][c] - uv[0][c];
+                step[ui + c] = (float)(256.0 * inv * ((double)A[1] * (double)d1[ui + c] + (double)A[2] * (double)d2[ui + c]));
+            }
+        }
+    }
+    lin_uv = affine || flat_uv;
     constcol = batch && d1[2] == 0.f && d2[2] == 0.f && d1[3] == 0.f && d2[3] == 0.f && d1[4] == 0.f &&
                d2[4] == 0.f && d1[5] == 0.f && d2[5] == 0.f;
     if (constcol) {
@@ -950,6 +996,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         double w1, w2;
         float z, iw, var[NVAR];
         int64_t zfix, zfstep;
+        int zsafe;
         int32_t c0, c1, c2, c3, c4, e0, e1, e2, e3, e4; /* colour and fog and their steps, 16.16 */
         int32_t cfix[5] = { 0, 0, 0, 0, 0 }, cstep[5] = { 0, 0, 0, 0, 0 }; /* colour (and fog), 16.16 */
         int px;
@@ -980,12 +1027,15 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         }
         z = s0->z + (float)(w1 * (double)dz1 + w2 * (double)dz2);
         iw = s0->iw + (float)(w1 * (double)diw1 + w2 * (double)diw2);
-        for (int k = 0; k < nvar; k++) var[k] = s0->v[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
+        for (int k = 0; k < nvar; k++) var[k] = base[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
         /* depth: 24.32 fixed point, so the first pixel is depth24(z) exactly */
         {
             double zq = (double)(z <= 0.f ? 0.f : z >= 1.f ? 1.f : z) * 16777215.0 + 0.5;
+            const double zend = zq + (double)zstep * 16777215.0 * (double)(xe - xs);
             zfix = (int64_t)(zq * 4294967296.0);
             zfstep = (int64_t)((double)zstep * 16777215.0 * 4294967296.0);
+            /* the whole row inside the depth range: no clamp per pixel */
+            zsafe = zq >= 1.0 && zq < 16777215.0 && zend >= 1.0 && zend < 16777215.0;
         }
         if (batch) {
             if (!constcol)
@@ -1008,11 +1058,11 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         e0 = cstep[0]; e1 = cstep[1]; e2 = cstep[2]; e3 = cstep[3]; e4 = cstep[4];
         while (px <= xe) {
             /* one piece: texture coordinates exact at both ends, linear between */
-            int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
+            int len = lin_uv || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
             int32_t uf = 0, vf = 0, duf = 0, dvf = 0;
             /* shorten the piece until stepping linearly stays within 1/32 texel of
              * the exact coordinate at its middle */
-            while (sp.on && !affine && len > 1) {
+            while (sp.on && !lin_uv && len > 1) {
                 const float h = (float)(len / 2), n = (float)len;
                 const float w0 = 1.f / iw, wm = 1.f / (iw + iwstep * h), wn = 1.f / (iw + iwstep * n);
                 const float u0 = var[ui] * w0, un = (var[ui] + step[ui] * n) * wn, um = (var[ui] + step[ui] * h) * wm;
@@ -1023,7 +1073,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 len /= 2;
             }
             if (sp.on) {
-                const float wa = 1.f / iw, iwb = iw + iwstep * (float)len, wb = affine ? wa : 1.f / iwb;
+                const float wa = flat_uv ? 1.f : 1.f / iw, iwb = iw + iwstep * (float)len, wb = lin_uv ? wa : 1.f / iwb;
                 double ua = (double)(var[ui] * wa * tw - half), va = (double)(var[ui + 1] * wa * th - half);
                 double ub = (double)((var[ui] + step[ui] * (float)len) * wb * tw - half);
                 double vb = (double)((var[ui + 1] + step[ui + 1] * (float)len) * wb * th - half);
@@ -1042,9 +1092,14 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                      c2 += e2, c3 += e3, c4 += e4) {
                 uint32_t zi = 0, tx, tr, tg, tb, ta, o0, o1, o2, o3;
                 if (do_z) {
-                    zi = zfix <= 0 ? 0 : (uint32_t)(zfix >> 32);
-                    if (zi > 0xFFFFFFu) zi = 0xFFFFFFu;
-                    if (!ztest(zf, zi, zrow[i])) continue;
+                    if (zsafe) {
+                        zi = (uint32_t)((uint64_t)zfix >> 32);
+                    } else {
+                        zi = zfix <= 0 ? 0 : (uint32_t)(zfix >> 32);
+                        if (zi > 0xFFFFFFu) zi = 0xFFFFFFu;
+                    }
+                    /* GEQUAL and GREATER (the game's two) as one signed compare */
+                    if (zfast ? (int32_t)zi - zgt < (int32_t)zrow[i] : !ztest(zf, zi, zrow[i])) continue;
                 }
                 tx = tex_on ? sample32(tpx, txw, txh, tbpp, prow, lin, tcs, tct, uf, vf) : 0xFFFFFFFFu;
                 tr = tx & 255u; tg = (tx >> 8) & 255u; tb = (tx >> 16) & 255u; ta = tx >> 24;
@@ -1257,6 +1312,7 @@ void swgl_install(void)
     if (getenv("MVC2_SWGL_STATS")) {
         St.on = 1;
         St.from = strtol(getenv("MVC2_SWGL_STATS"), 0, 0);
+        if (getenv("MVC2_SWGL_STOP")) St.stop = strtol(getenv("MVC2_SWGL_STOP"), 0, 0); /* quit after that many timed frames */
         atexit(stats_report);
     }
 }

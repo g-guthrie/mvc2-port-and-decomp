@@ -6,23 +6,25 @@
 *Marvel vs. Capcom 2: New Age of Heroes*, rebuilt from source, on the way to
 one file that runs anywhere.
 
-**The aim** is a universal port: the actual game as one self-contained module
-plus a handful of functions per device, the same on everything, the way
-people ask "can it run Doom?". It plays by the arcade's rules. The plan and
-where it stands are in [ROADMAP.md](ROADMAP.md).
+**To play it**, use the browser port: open the page, choose your own disc
+image once, and it runs on a phone or a computer
+([player guide](port/docs/USER_GUIDE.md)). It plays by the arcade's rules.
+
+There is also a universal build: the game as one self-contained module plus
+a handful of functions per device, drawn on the CPU. It works and is parked;
+[ROADMAP.md](ROADMAP.md) says why and where it stands.
 
 | Part | Where | State | How it is checked |
 | --- | --- | --- | --- |
 | **PS2 decompilation** (NTSC-U `SLUS_204.86`) | [`src/`](src), [`config/`](config), [`tools/`](tools) | 99.93% of code, 99.99% of data | Rebuilds the retail ELF byte for byte |
 | **Arcade (NAOMI) decompilation** | [`naomi/`](naomi) | In progress: 58.4% of the main image, 36.9% as verified C. Not needed for the port; worked on when a question about arcade behaviour needs it | Rebuilds the retail ROM bytes it covers |
 | **The port**: the game's own code, no emulator, in the browser and on the desktop | [`port/`](port) | Playable end to end | 1.1 million fuzzed frames equal to the retail PS2 game; compared with the arcade ROM |
-| **The universal build** (`mvc2g`): one module, five host functions, no GPU | [`port/generic/`](port/generic) | Picture, sound and buttons work; not yet 60 fps | The plain-C translation equals the wasm frame for frame; picture within 2 levels of the GL renderer on 99.9% of fight pixels |
+| **The universal build** (`mvc2g`): one module, five host functions, no GPU | [`port/generic/`](port/generic) | Parked. Picture, sound and buttons work on x86-64, arm64 and big-endian; fights run at full speed by skipping some frames | The plain-C translation equals the wasm frame for frame; picture within 2 levels of the GL renderer on 99.9% of fight pixels |
 
 No game data is in this repository. Everything runs from your own disc.
 
-**New here?** Read [ROADMAP.md](ROADMAP.md) for the goal and the current
-state, then [AGENTS.md](AGENTS.md) for the map of the repository, how to set
-up a machine, and the rules of each part.
+**New here?** Read [AGENTS.md](AGENTS.md) for the map of the repository, how
+to set up a machine, and the rules of each part.
 
 ## The port
 

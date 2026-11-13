@@ -37,9 +37,15 @@ ninja -t commands mvc2_host | tail -1 | sed -e 's/^: && //' -e 's/ && :$//' \
 sh "$OUT/link.cmd"
 cd "$OUT"
 wasm2c mvc2g.wasm -n mvc2g -o mvc2g_w2c.c
+python3 "$ROOT/port/generic/fix_w2c.py" mvc2g_w2c.c    # big-endian memory.fill / memory.copy
 ${CC:-cc} -O2 -w -c mvc2g_w2c.c -o mvc2g_w2c.o
 ${CC:-cc} -O2 -w -I"$W2C" -I. "$ROOT/port/generic/host_w2c.c" mvc2g_w2c.o \
     "$W2C/wasm-rt-impl.c" -lm -o mvc2g_native
+# the playable host, where SDL2 is installed
+if command -v sdl2-config >/dev/null 2>&1; then
+    ${CC:-cc} -O2 -w -I"$W2C" -I. $(sdl2-config --cflags) "$ROOT/port/generic/host_sdl.c" mvc2g_w2c.o \
+        "$W2C/wasm-rt-impl.c" -lm $(sdl2-config --libs) -o mvc2g_sdl
+fi
 # EMBED=1: also a personal build with the disc inside (no file access needed).
 # It contains the game, so it goes to private/ and is never committed or shared.
 if [ -n "$EMBED" ] && [ -f "$ISO" ]; then
