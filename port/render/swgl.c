@@ -870,7 +870,8 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                  : G.bl_s == GL_ONE && G.bl_d == GL_ZERO ? BL_OFF : BL_GEN;
     const int fogged = !batch && (fc->flags & 16);
     float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep, tw = 1.f, th = 1.f, half = 0.f;
-    int affine, constcol, white = 0;
+    int affine, constcol, white = 0, flat_uv = 0, lin_uv;
+    float base[NVAR];
     uint32_t cc16[4] = { ONE16, ONE16, ONE16, ONE16 }; /* vertex colour, 8.8 */
     uint32_t q0, q1, q2, q3;
     const int32_t fog0 = (int32_t)fc->fog8[0] << 8, fog1 = (int32_t)fc->fog8[1] << 8, fog2 = (int32_t)fc->fog8[2] << 8;
@@ -924,6 +925,43 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     diw1 = s1->iw - s0->iw; diw2 = s2->iw - s0->iw; iwstep = GRAD(diw1, diw2);
 #undef GRAD
     affine = diw1 == 0.f && diw2 == 0.f;
+    for (int k = 0; k < nvar; k++) base[k] = s0->v[k];
+    /* A small triangle far from the eye: if the exact texture coordinate at the
+     * middle of each edge and at the centre is within 1/64 texel of the straight
+     * line between the vertices, step u and v linearly over the whole triangle
+     * (no divide per row).  Most stage triangles are like this. */
+    if (!affine && sp.on) {
+        const float w[3] = { 1.f / s0->iw, 1.f / s1->iw, 1.f / s2->iw };
+        const SV *sv[3] = { s0, s1, s2 };
+        float uv[3][2], worst = 0.f;
+        for (int i = 0; i < 3; i++) { uv[i][0] = sv[i]->v[ui] * w[i]; uv[i][1] = sv[i]->v[ui + 1] * w[i]; }
+        for (int c = 0; c < 2; c++) {
+            const float scale = c ? th : tw;
+            for (int i = 0; i < 3; i++) {
+                const int j = (i + 1) % 3;
+                const float exact = (sv[i]->v[ui + c] + sv[j]->v[ui + c]) / (sv[i]->iw + sv[j]->iw);
+                const float e = (exact - (uv[i][c] + uv[j][c]) * 0.5f) * scale;
+                if (e > worst) worst = e;
+                if (-e > worst) worst = -e;
+            }
+            {
+                const float exact = (s0->v[ui + c] + s1->v[ui + c] + s2->v[ui + c]) / (s0->iw + s1->iw + s2->iw);
+                const float e = (exact - (uv[0][c] + uv[1][c] + uv[2][c]) * (1.f / 3.f)) * scale;
+                if (e > worst) worst = e;
+                if (-e > worst) worst = -e;
+            }
+        }
+        if (worst < 1.f / 64.f) {
+            flat_uv = 1;
+            for (int c = 0; c < 2; c++) {
+                base[ui + c] = uv[0][c];
+                d1[ui + c] = uv[1][c] - uv[0][c];
+                d2[ui + c] = uv[2][c] - uv[0][c];
+                step[ui + c] = (float)(256.0 * inv * ((double)A[1] * (double)d1[ui + c] + (double)A[2] * (double)d2[ui + c]));
+            }
+        }
+    }
+    lin_uv = affine || flat_uv;
     constcol = batch && d1[2] == 0.f && d2[2] == 0.f && d1[3] == 0.f && d2[3] == 0.f && d1[4] == 0.f &&
                d2[4] == 0.f && d1[5] == 0.f && d2[5] == 0.f;
     if (constcol) {
@@ -980,7 +1018,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         }
         z = s0->z + (float)(w1 * (double)dz1 + w2 * (double)dz2);
         iw = s0->iw + (float)(w1 * (double)diw1 + w2 * (double)diw2);
-        for (int k = 0; k < nvar; k++) var[k] = s0->v[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
+        for (int k = 0; k < nvar; k++) var[k] = base[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
         /* depth: 24.32 fixed point, so the first pixel is depth24(z) exactly */
         {
             double zq = (double)(z <= 0.f ? 0.f : z >= 1.f ? 1.f : z) * 16777215.0 + 0.5;
@@ -1008,11 +1046,11 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         e0 = cstep[0]; e1 = cstep[1]; e2 = cstep[2]; e3 = cstep[3]; e4 = cstep[4];
         while (px <= xe) {
             /* one piece: texture coordinates exact at both ends, linear between */
-            int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
+            int len = lin_uv || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
             int32_t uf = 0, vf = 0, duf = 0, dvf = 0;
             /* shorten the piece until stepping linearly stays within 1/32 texel of
              * the exact coordinate at its middle */
-            while (sp.on && !affine && len > 1) {
+            while (sp.on && !lin_uv && len > 1) {
                 const float h = (float)(len / 2), n = (float)len;
                 const float w0 = 1.f / iw, wm = 1.f / (iw + iwstep * h), wn = 1.f / (iw + iwstep * n);
                 const float u0 = var[ui] * w0, un = (var[ui] + step[ui] * n) * wn, um = (var[ui] + step[ui] * h) * wm;
@@ -1023,7 +1061,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 len /= 2;
             }
             if (sp.on) {
-                const float wa = 1.f / iw, iwb = iw + iwstep * (float)len, wb = affine ? wa : 1.f / iwb;
+                const float wa = flat_uv ? 1.f : 1.f / iw, iwb = iw + iwstep * (float)len, wb = lin_uv ? wa : 1.f / iwb;
                 double ua = (double)(var[ui] * wa * tw - half), va = (double)(var[ui + 1] * wa * th - half);
                 double ub = (double)((var[ui] + step[ui] * (float)len) * wb * tw - half);
                 double vb = (double)((var[ui + 1] + step[ui + 1] * (float)len) * wb * th - half);
