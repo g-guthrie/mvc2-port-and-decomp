@@ -79,7 +79,9 @@ static void wav_header(FILE *f, unsigned bytes)
 /* mvc2g_native DISC FRAMES [--hash] [--mash] [--wav FILE.wav] [--shot FRAME:FILE.ppm]...
  * --wav writes the sound of the whole run (800 frames of 48 kHz stereo per game step);
  * --hash prints the state hash of every frame (the wasm comparison);
- * --mash presses START and CROSS in turn, which gets from the title into a fight. */
+ * --mash presses START and CROSS in turn, which gets from the title into a fight;
+ * --fuzz SEED does that outside fights and presses random directions and
+ * attack buttons inside them (state 2/1/2). */
 int main(int argc, char **argv)
 {
     static w2c_mvc2g m;
@@ -93,7 +95,8 @@ int main(int argc, char **argv)
     struct w2c_wasi__snapshot__preview1 wasi = { &m };
     long i, n = argc > a0 ? strtol(argv[a0], 0, 0) : 0, shot_at[16];
     const char *shot_file[16];
-    int hash = 0, mash = 0, nshot = 0, a;
+    int hash = 0, mash = 0, nshot = 0, a, fuzz = 0;
+    unsigned rng = 1, held = 0;
     FILE *wav = 0;
     unsigned wav_bytes = 0;
     double t0, step = 0.0, disc_size;
@@ -103,6 +106,7 @@ int main(int argc, char **argv)
     for (a = a0 + 1; a < argc; a++) {
         if (!strcmp(argv[a], "--hash")) hash = 1;
         else if (!strcmp(argv[a], "--mash")) mash = 1;
+        else if (!strcmp(argv[a], "--fuzz") && a + 1 < argc) { fuzz = mash = 1; rng = (unsigned)strtoul(argv[++a], 0, 0) * 2654435761u + 1; }
         else if (!strcmp(argv[a], "--wav") && a + 1 < argc) { wav = fopen(argv[++a], "wb"); if (wav) wav_header(wav, 0); }
         else if (!strcmp(argv[a], "--shot") && a + 1 < argc && nshot < 16) {
             char *c = strchr(argv[++a], ':');
@@ -120,7 +124,14 @@ int main(int argc, char **argv)
     w2c_mvc2g_0x5Finitialize(&m);
     if (w2c_mvc2g_mvc2g_boot(&m, disc_size)) return 2;
     for (i = 0; i < n; i++) {
-        if (mash) {
+        if (fuzz && w2c_mvc2g_mvc2g_game_state(&m) == 0x020102) {
+            if (i % 5 == 0) {
+                rng = rng * 1664525u + 1013904223u;
+                /* directions and the six attack buttons; never START (it pauses) */
+                held = (rng >> 8) & (0x00F0u | 0xF000u | 0x0C00u) & ((rng >> 3) | (rng >> 17));
+            }
+            w2c_mvc2g_mvc2g_pad(&m, 0, held);
+        } else if (mash) {
             int ph = (int)(i % 40);
             w2c_mvc2g_mvc2g_pad(&m, 0, ph < 4 ? 0x0008 : ph >= 20 && ph < 24 ? 0x4000 : 0);
         }
