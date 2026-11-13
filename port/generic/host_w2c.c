@@ -48,7 +48,19 @@ static double now_sec(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-/* mvc2g_native DISC FRAMES [--hash] [--mash] [--shot FRAME:FILE.ppm]...
+static void wav_header(FILE *f, unsigned bytes)
+{
+    unsigned char h[44] = "RIFF....WAVEfmt ";
+    unsigned v[] = { 36 + bytes, 16, 1 | 2 << 16, 48000, 48000 * 4, 4 | 16 << 16, bytes };
+    int at[] = { 4, 16, 20, 24, 28, 32, 40 }, i;
+    memcpy(h + 36, "data", 4);
+    for (i = 0; i < 7; i++) wr32(h + at[i], v[i]);
+    fseek(f, 0, SEEK_SET);
+    fwrite(h, 1, 44, f);
+}
+
+/* mvc2g_native DISC FRAMES [--hash] [--mash] [--wav FILE.wav] [--shot FRAME:FILE.ppm]...
+ * --wav writes the sound of the whole run (800 frames of 48 kHz stereo per game step);
  * --hash prints the state hash of every frame (the wasm comparison);
  * --mash presses START and CROSS in turn, which gets from the title into a fight. */
 int main(int argc, char **argv)
@@ -59,11 +71,14 @@ int main(int argc, char **argv)
     long i, n = argc > 2 ? strtol(argv[2], 0, 0) : 0, shot_at[16];
     const char *shot_file[16];
     int hash = 0, mash = 0, nshot = 0, a;
+    FILE *wav = 0;
+    unsigned wav_bytes = 0;
     double t0, step = 0.0;
     if (!env.disc) { fprintf(stderr, "usage: %s DISC FRAMES [--hash] [--mash] [--shot FRAME:FILE.ppm]\n", argv[0]); return 1; }
     for (a = 3; a < argc; a++) {
         if (!strcmp(argv[a], "--hash")) hash = 1;
         else if (!strcmp(argv[a], "--mash")) mash = 1;
+        else if (!strcmp(argv[a], "--wav") && a + 1 < argc) { wav = fopen(argv[++a], "wb"); if (wav) wav_header(wav, 0); }
         else if (!strcmp(argv[a], "--shot") && a + 1 < argc && nshot < 16) {
             char *c = strchr(argv[++a], ':');
             if (c) { shot_at[nshot] = strtol(argv[a], 0, 0); shot_file[nshot++] = c + 1; }
@@ -81,6 +96,11 @@ int main(int argc, char **argv)
         }
         t0 = now_sec();
         w2c_mvc2g_mvc2g_frame(&m);
+        if (wav) {
+            const u8 *pcm = mem(&m) + w2c_mvc2g_mvc2g_audio(&m, 800);
+            fwrite(pcm, 1, 800 * 4, wav);
+            wav_bytes += 800 * 4;
+        }
         step += now_sec() - t0;
         if (hash)
             printf("%ld %08x %06x\n", i, w2c_mvc2g_mvc2g_state_hash(&m), w2c_mvc2g_mvc2g_game_state(&m));
@@ -95,7 +115,8 @@ int main(int argc, char **argv)
                 fclose(f);
             }
     }
-    fprintf(stderr, "[mvc2g] %ld frames, %.2f ms per frame (game step + drawing), state %06x\n", n,
+    if (wav) { wav_header(wav, wav_bytes); fclose(wav); }
+    fprintf(stderr, "[mvc2g] %ld frames, %.2f ms per frame (game step, drawing, sound), state %06x\n", n,
             n ? step * 1000.0 / (double)n : 0.0, w2c_mvc2g_mvc2g_game_state(&m));
     return 0;
 }

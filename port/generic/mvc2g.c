@@ -12,9 +12,11 @@
  *
  *                 mvc2g_pad(port, buttons)         PS2 pad bits (platform/pad.h), before a step
  *                 mvc2g_canvas()                   the picture: 640x480 RGBA8, top row first
+ *                 mvc2g_audio(frames)              that many 48 kHz stereo frames, signed 16-bit
  *
- * The picture is drawn by the port's renderer on render/swgl.c (no GPU).
- * Sound follows.
+ * The picture is drawn by the port's renderer on render/swgl.c (no GPU), the
+ * sound is mixed by port/audio (no device): the host only shows the canvas
+ * and plays the samples.  One game step is 1/60 s, i.e. 800 frames of sound.
  */
 #include <stdint.h>
 #include <emscripten.h>
@@ -23,7 +25,10 @@
 #include "../render/render.h"
 #include "../render/swgl.h"
 
+#include "../audio/audio.h"
+
 void fe_render_init(void);
+int fe_audio_init(int open_device);
 
 extern unsigned char mvc2_ee_bss[];
 extern unsigned char *host_ee_heap_base(void);
@@ -42,6 +47,7 @@ EMSCRIPTEN_KEEPALIVE int mvc2g_boot(double disc_size)
     swgl_window(FL_SCREEN_W, FL_SCREEN_H);
     if (r_init()) return -2;
     fe_render_init();
+    fe_audio_init(0);
     mvc2_boot(1);
     return 0;
 }
@@ -50,6 +56,21 @@ EMSCRIPTEN_KEEPALIVE void mvc2g_pad(int port, int buttons)
 {
     PadRaw p = { (uint16_t)buttons, 0x80, 0x80, 0x80, 0x80, 1, 0 };
     host_pad_set(port, &p);
+}
+
+EMSCRIPTEN_KEEPALIVE const int16_t *mvc2g_audio(int frames)
+{
+    enum { MAX = AUDIO_RATE / 10 };
+    static float mix[MAX * 2];
+    static int16_t pcm[MAX * 2];
+    if (frames > MAX) frames = MAX;
+    if (frames < 0) frames = 0;
+    audio_render(mix, frames);
+    for (int i = 0; i < 2 * frames; i++) {
+        float x = mix[i] * 32767.f;
+        pcm[i] = (int16_t)(x > 32767.f ? 32767.f : x < -32768.f ? -32768.f : x);
+    }
+    return pcm;
 }
 
 EMSCRIPTEN_KEEPALIVE const uint8_t *mvc2g_canvas(void)

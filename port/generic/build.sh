@@ -16,12 +16,15 @@ mkdir -p "$OUT"
 cd "$EM"
 # the mvc2_host link line, with the response file kept
 rm -f mvc2_host.js && ninja -d keeprsp mvc2_host >/dev/null
-# the entry point, the game's render glue and the renderer on swgl (no GL, no SDL)
+# the entry point, the game's render and sound glue, the renderer on swgl and the
+# mixer with no device (no GL, no SDL)
 OBJS=
-for f in generic/mvc2g.c host/fe/fe_render.c host/fe/fe_mesh.c host/fe/fe_char.c render/r_gl.c \
-         render/r_char.c render/r_mesh.c render/decode.c render/r_font.c render/swgl.c; do
+for f in generic/mvc2g.c host/fe/fe_render.c host/fe/fe_mesh.c host/fe/fe_char.c host/fe/fe_audio.c \
+         render/r_gl.c render/r_char.c render/r_mesh.c render/decode.c render/r_font.c render/swgl.c \
+         audio/adx.c audio/vag.c audio/hdbank.c audio/resample.c audio/synth.c audio/tsd.c audio/audio.c \
+         audio/wav.c audio/dcse.c platform/settings.c; do
     o="$OUT/$(basename "$f" .c).o"
-    emcc -O2 -DPORT_SWGL -I"$ROOT/port/stubs" -I"$ROOT/port/host" -I"$ROOT/port/platform" -I"$EM/glue" \
+    emcc -O2 -DPORT_SWGL -DPORT_NO_AUDIO_DEVICE -I"$ROOT/port/stubs" -I"$ROOT/port/host" -I"$ROOT/port/platform" -I"$EM/glue" \
         -c "$ROOT/port/$f" -o "$o"
     OBJS="$OBJS $o"
 done
