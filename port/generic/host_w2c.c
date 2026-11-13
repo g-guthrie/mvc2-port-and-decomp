@@ -9,9 +9,37 @@
 
 struct w2c_env { FILE *disc; w2c_mvc2g *m; };
 struct w2c_wasi__snapshot__preview1 { w2c_mvc2g *m; };
-static u8 *mem(w2c_mvc2g *m) { return w2c_mvc2g_memory(m)->data; }
 static u32 rd32(u8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24; }
 static void wr32(u8 *p, u32 v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+/* The module's memory is little-endian bytes at addresses 0..size-1.  On a
+ * big-endian host wasm2c keeps it mirrored (the byte at address a is
+ * data[size - 1 - a]) so that its own loads and stores are native; the host
+ * therefore goes through m_get / m_put and never through a raw pointer. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define MVC2G_MIRRORED 1
+#else
+#define MVC2G_MIRRORED 0
+#endif
+static void m_get(w2c_mvc2g *m, u32 addr, void *out, size_t n)
+{
+    wasm_rt_memory_t *mm = w2c_mvc2g_memory(m);
+    u8 *o = (u8 *)out;
+    size_t i;
+    if ((u64)addr + n > mm->size) { memset(out, 0, n); return; }
+    if (!MVC2G_MIRRORED) { memcpy(out, mm->data + addr, n); return; }
+    for (i = 0; i < n; i++) o[i] = mm->data[mm->size - 1 - addr - i];
+}
+static void m_put(w2c_mvc2g *m, u32 addr, const void *in, size_t n)
+{
+    wasm_rt_memory_t *mm = w2c_mvc2g_memory(m);
+    const u8 *p = (const u8 *)in;
+    size_t i;
+    if ((u64)addr + n > mm->size) return;
+    if (!MVC2G_MIRRORED) { memcpy(mm->data + addr, in, n); return; }
+    for (i = 0; i < n; i++) mm->data[mm->size - 1 - addr - i] = p[i];
+}
+static u32 m_rd32(w2c_mvc2g *m, u32 addr) { u8 b[4]; m_get(m, addr, b, 4); return rd32(b); }
+static void m_wr32(w2c_mvc2g *m, u32 addr, u32 v) { u8 b[4]; wr32(b, v); m_put(m, addr, b, 4); }
 
 u32 w2c_env_0x5F_syscall_getdents64(struct w2c_env *e, u32 a, u32 b, u32 c) { return (u32)-1; }
 u32 w2c_env_0x5F_syscall_rmdir(struct w2c_env *e, u32 a) { return (u32)-1; }
@@ -29,19 +57,28 @@ u32 w2c_env_page_disc_read(struct w2c_env *e, f64 off, u32 n, u32 dst)
     const size_t size = (size_t)(mvc2g_disc_end - mvc2g_disc), o = (size_t)off;
     if (o >= size) return 0;
     if (n > size - o) n = (u32)(size - o);
-    memcpy(mem(e->m) + dst, mvc2g_disc + o, n);
+    m_put(e->m, dst, mvc2g_disc + o, n);
     return n;
 }
 #else
 u32 w2c_env_page_disc_read(struct w2c_env *e, f64 off, u32 n, u32 dst)
 {
+    static u8 buf[65536];
+    u32 done = 0;
     fseeko(e->disc, (off_t)off, SEEK_SET);
-    return (u32)fread(mem(e->m) + dst, 1, n, e->disc);
+    while (done < n) {
+        const u32 want = n - done < sizeof buf ? n - done : (u32)sizeof buf;
+        const u32 got = (u32)fread(buf, 1, want, e->disc);
+        m_put(e->m, dst + done, buf, got);
+        done += got;
+        if (got != want) break;
+    }
+    return done;
 }
 #endif
-u32 w2c_wasi__snapshot__preview1_clock_time_get(struct w2c_wasi__snapshot__preview1 *w, u32 id, u64 prec, u32 out) { memset(mem(w->m) + out, 0, 8); return 0; }
+u32 w2c_wasi__snapshot__preview1_clock_time_get(struct w2c_wasi__snapshot__preview1 *w, u32 id, u64 prec, u32 out) { m_wr32(w->m, out, 0); m_wr32(w->m, out + 4, 0); return 0; }
 u32 w2c_wasi__snapshot__preview1_environ_get(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b) { return 0; }
-u32 w2c_wasi__snapshot__preview1_environ_sizes_get(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b) { wr32(mem(w->m) + a, 0); wr32(mem(w->m) + b, 0); return 0; }
+u32 w2c_wasi__snapshot__preview1_environ_sizes_get(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b) { m_wr32(w->m, a, 0); m_wr32(w->m, b, 0); return 0; }
 u32 w2c_wasi__snapshot__preview1_fd_close(struct w2c_wasi__snapshot__preview1 *w, u32 a) { return 0; }
 u32 w2c_wasi__snapshot__preview1_fd_read(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b, u32 c, u32 d) { return 8; }
 u32 w2c_wasi__snapshot__preview1_fd_seek(struct w2c_wasi__snapshot__preview1 *w, u32 a, u64 b, u32 c, u32 d) { return 8; }
@@ -49,11 +86,11 @@ u32 w2c_wasi__snapshot__preview1_fd_write(struct w2c_wasi__snapshot__preview1 *w
 {
     u32 t = 0, i;
     for (i = 0; i < n; i++) {
-        u32 p = rd32(mem(w->m) + iov + 8 * i), l = rd32(mem(w->m) + iov + 8 * i + 4);
-        fwrite(mem(w->m) + p, 1, l, stderr);
+        u32 p = m_rd32(w->m, iov + 8 * i), l = m_rd32(w->m, iov + 8 * i + 4), k;
+        for (k = 0; k < l; k++) { u8 c; m_get(w->m, p + k, &c, 1); fputc(c, stderr); }
         t += l;
     }
-    wr32(mem(w->m) + pn, t);
+    m_wr32(w->m, pn, t);
     return 0;
 }
 void w2c_wasi__snapshot__preview1_proc_exit(struct w2c_wasi__snapshot__preview1 *w, u32 c) { exit((int)c); }
@@ -143,8 +180,9 @@ int main(int argc, char **argv)
         t0 = now_sec();
         w2c_mvc2g_mvc2g_frame(&m);
         if (wav) {
-            const u8 *pcm = mem(&m) + w2c_mvc2g_mvc2g_audio(&m, 800);
-            fwrite(pcm, 1, 800 * 4, wav);
+            static u8 pcm[800 * 4];
+            m_get(&m, w2c_mvc2g_mvc2g_audio(&m, 800), pcm, sizeof pcm);
+            fwrite(pcm, 1, sizeof pcm, wav);
             wav_bytes += 800 * 4;
         }
         if (i >= time_from) step += now_sec() - t0;
@@ -152,9 +190,10 @@ int main(int argc, char **argv)
             printf("%ld %08x %06x\n", i, w2c_mvc2g_mvc2g_state_hash(&m), w2c_mvc2g_mvc2g_game_state(&m));
         for (a = 0; a < nshot; a++)
             if (shot_at[a] == i) {
-                const u8 *px = mem(&m) + w2c_mvc2g_mvc2g_canvas(&m);
+                static u8 px[640 * 480 * 4];
                 FILE *f = fopen(shot_file[a], "wb");
                 int k;
+                m_get(&m, w2c_mvc2g_mvc2g_canvas(&m), px, sizeof px);
                 if (!f) continue;
                 fprintf(f, "P6\n640 480\n255\n");
                 for (k = 0; k < 640 * 480; k++) fwrite(px + 4 * k, 1, 3, f);
