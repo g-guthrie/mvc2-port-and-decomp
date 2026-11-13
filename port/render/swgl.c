@@ -686,10 +686,10 @@ static inline void sample_fix(const Samp *sp, int32_t uf, int32_t vf, uint8_t o[
         }
         /* two channels per multiply: x and y lerps on the 0x00FF00FF halves */
         memcpy(&p00, c00, 4); memcpy(&p10, c10, 4); memcpy(&p01, c01, 4); memcpy(&p11, c11, 4);
-        t0 = (((p00 & 0xFF00FFu) * (256u - a) + (p10 & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
-        t1 = ((((p00 >> 8) & 0xFF00FFu) * (256u - a) + ((p10 >> 8) & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
-        b0 = (((p01 & 0xFF00FFu) * (256u - a) + (p11 & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
-        b1 = ((((p01 >> 8) & 0xFF00FFu) * (256u - a) + ((p11 >> 8) & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
+        t0 = (((p00 & 0xFF00FFu) * (256u - a) + (p10 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+        t1 = ((((p00 >> 8) & 0xFF00FFu) * (256u - a) + ((p10 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+        b0 = (((p01 & 0xFF00FFu) * (256u - a) + (p11 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+        b1 = ((((p01 >> 8) & 0xFF00FFu) * (256u - a) + ((p11 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
         lo = ((t0 * (256u - b) + b0 * b + 0x800080u) >> 8) & 0xFF00FFu;
         lo |= (t1 * (256u - b) + b1 * b + 0x800080u) & 0xFF00FF00u;
         memcpy(o, &lo, 4);
@@ -792,7 +792,10 @@ static inline int64_t floor64(double d)
  * point value cannot overflow; `shift` carries the same move to the other
  * end of the chunk. */
 #define SPAN 16
-#define TEXEL_NUDGE 64 /* 1/1024 texel */
+/* A pixel centre exactly on a texel boundary takes the texel on the higher
+ * side.  Scaled sprites (16 texels over 26 pixels) hit that case every 13
+ * pixels, and float rounding alone would decide it differently per device. */
+#define TEXEL_TIE 64 /* 1/1024 texel */
 
 /* Varyings divided by w are linear in screen space.  colour * w and fog * w
  * divided by w are the colour and the fog themselves, so only the texture
@@ -944,8 +947,20 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         px = xs;
         while (px <= xe) {
             /* one piece: texture coordinates exact at both ends, linear between */
-            const int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
+            int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
             int32_t uf = 0, vf = 0, duf = 0, dvf = 0;
+            /* shorten the piece until stepping linearly stays within 1/32 texel of
+             * the exact coordinate at its middle */
+            while (sp.on && !affine && len > 1) {
+                const float h = (float)(len / 2), n = (float)len;
+                const float w0 = 1.f / iw, wm = 1.f / (iw + iwstep * h), wn = 1.f / (iw + iwstep * n);
+                const float u0 = var[ui] * w0, un = (var[ui] + step[ui] * n) * wn, um = (var[ui] + step[ui] * h) * wm;
+                const float v0 = var[ui + 1] * w0, vn = (var[ui + 1] + step[ui + 1] * n) * wn,
+                            vm = (var[ui + 1] + step[ui + 1] * h) * wm;
+                const float eu = (u0 + (un - u0) * (h / n) - um) * tw, ev = (v0 + (vn - v0) * (h / n) - vm) * th;
+                if (eu < 1.f / 32.f && eu > -1.f / 32.f && ev < 1.f / 32.f && ev > -1.f / 32.f) break;
+                len /= 2;
+            }
             if (sp.on) {
                 const float wa = 1.f / iw, iwb = iw + iwstep * (float)len, wb = affine ? wa : 1.f / iwb;
                 double ua = (double)(var[ui] * wa * tw - half), va = (double)(var[ui + 1] * wa * th - half);
@@ -958,9 +973,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 else { sv = (double)floor64(va / th) * th; va -= sv; vb -= sv; }
                 if (ub - ua > 16000.0 || ua - ub > 16000.0) ub = ua;
                 if (vb - va > 16000.0 || va - vb > 16000.0) vb = va;
-                /* + TEXEL_NUDGE: a coordinate that float rounding left a hair below a
-                 * texel edge takes the texel it was aimed at (sprites drawn 1:1) */
-                uf = (int32_t)floor64(ua * 65536.0) + TEXEL_NUDGE; vf = (int32_t)floor64(va * 65536.0) + TEXEL_NUDGE;
+                uf = (int32_t)floor64(ua * 65536.0) + TEXEL_TIE; vf = (int32_t)floor64(va * 65536.0) + TEXEL_TIE;
                 duf = (int32_t)(floor64(ub * 65536.0) - uf) / len;
                 dvf = (int32_t)(floor64(vb * 65536.0) - vf) / len;
             }
