@@ -267,7 +267,8 @@ if(MVC2_APP)
     ${PORT_DIR}/platform/platform_sdl.c ${PORT_DIR}/platform/png_write.c
     ${PORT_DIR}/platform/settings.c ${PORT_DIR}/platform/input.c)
   set(MVC2_FE_RENDER ${PORT_DIR}/render/r_gl.c ${PORT_DIR}/render/r_char.c
-    ${PORT_DIR}/render/r_mesh.c ${PORT_DIR}/render/decode.c ${PORT_DIR}/render/r_font.c)
+    ${PORT_DIR}/render/r_mesh.c ${PORT_DIR}/render/decode.c ${PORT_DIR}/render/r_font.c
+    ${PORT_DIR}/render/swgl.c)
   set(MVC2_FE_AUDIO ${PORT_DIR}/audio/adx.c ${PORT_DIR}/audio/vag.c ${PORT_DIR}/audio/hdbank.c
     ${PORT_DIR}/audio/resample.c ${PORT_DIR}/audio/synth.c ${PORT_DIR}/audio/tsd.c
     ${PORT_DIR}/audio/audio.c ${PORT_DIR}/audio/wav.c ${PORT_DIR}/audio/dcse.c)

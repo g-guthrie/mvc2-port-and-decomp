@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include "../render/swgl.h"
 #include "platform.h"
 #include "input.h"
 #include "gl.h"
@@ -160,6 +162,14 @@ int plat_init(const PlatConfig *cfg)
     }
     SDL_GL_MakeCurrent(P.win, P.ctx);
     if (gl_load(is_es)) return -1;
+    /* MVC2_SWGL=1: draw with the software renderer (render/swgl.c) instead of
+     * the GL driver.  Testing: the window is not updated, screenshots are. */
+    if (getenv("MVC2_SWGL")) {
+        int dw, dh;
+        SDL_GL_GetDrawableSize(P.win, &dw, &dh);
+        swgl_install();
+        swgl_window(dw, dh);
+    }
     plat_set_vsync(cfg->vsync);
     snprintf(P.gl_desc, sizeof P.gl_desc, "%s | %s | %s", is_es ? "GLES3 ctx" : "GL3.3 core ctx",
              (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
