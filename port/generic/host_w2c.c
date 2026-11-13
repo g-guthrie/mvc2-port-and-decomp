@@ -80,6 +80,7 @@ static void wav_header(FILE *f, unsigned bytes)
  * --wav writes the sound of the whole run (800 frames of 48 kHz stereo per game step);
  * --hash prints the state hash of every frame (the wasm comparison);
  * --mash presses START and CROSS in turn, which gets from the title into a fight;
+ * --nodraw runs the game steps without drawing;
  * --fuzz SEED does that outside fights and presses random directions and
  * attack buttons inside them (state 2/1/2). */
 int main(int argc, char **argv)
@@ -95,7 +96,7 @@ int main(int argc, char **argv)
     struct w2c_wasi__snapshot__preview1 wasi = { &m };
     long i, n = argc > a0 ? strtol(argv[a0], 0, 0) : 0, shot_at[16];
     const char *shot_file[16];
-    int hash = 0, mash = 0, nshot = 0, a, fuzz = 0;
+    int hash = 0, mash = 0, nshot = 0, a, fuzz = 0, nodraw = 0;
     unsigned rng = 1, held = 0;
     FILE *wav = 0;
     unsigned wav_bytes = 0;
@@ -106,6 +107,7 @@ int main(int argc, char **argv)
     for (a = a0 + 1; a < argc; a++) {
         if (!strcmp(argv[a], "--hash")) hash = 1;
         else if (!strcmp(argv[a], "--mash")) mash = 1;
+        else if (!strcmp(argv[a], "--nodraw")) nodraw = 1;
         else if (!strcmp(argv[a], "--fuzz") && a + 1 < argc) { fuzz = mash = 1; rng = (unsigned)strtoul(argv[++a], 0, 0) * 2654435761u + 1; }
         else if (!strcmp(argv[a], "--wav") && a + 1 < argc) { wav = fopen(argv[++a], "wb"); if (wav) wav_header(wav, 0); }
         else if (!strcmp(argv[a], "--shot") && a + 1 < argc && nshot < 16) {
@@ -123,6 +125,7 @@ int main(int argc, char **argv)
     wasm2c_mvc2g_instantiate(&m, &env, &wasi);
     w2c_mvc2g_0x5Finitialize(&m);
     if (w2c_mvc2g_mvc2g_boot(&m, disc_size)) return 2;
+    if (nodraw) w2c_mvc2g_mvc2g_draw(&m, 0);
     for (i = 0; i < n; i++) {
         if (fuzz && w2c_mvc2g_mvc2g_game_state(&m) == 0x020102) {
             if (i % 5 == 0) {

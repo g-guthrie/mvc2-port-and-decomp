@@ -11,6 +11,7 @@
  *                 mvc2g_game_state()               g[0] << 16 | g[1] << 8 | g[2]
  *
  *                 mvc2g_pad(port, buttons)         PS2 pad bits (platform/pad.h), before a step
+ *                 mvc2g_draw(on)                   0: the next steps draw nothing (frame skip)
  *                 mvc2g_canvas()                   the picture: 640x480 RGBA8, top row first
  *                 mvc2g_audio(frames)              that many 48 kHz stereo frames, signed 16-bit
  *
@@ -60,6 +61,11 @@ EMSCRIPTEN_KEEPALIVE void mvc2g_pad(int port, int buttons)
     PadRaw p = { (uint16_t)buttons, 0x80, 0x80, 0x80, 0x80, 1, 0 };
     host_pad_set(port, &p);
 }
+
+/* A device too slow to draw every frame still runs every game step: it turns
+ * drawing off for the steps it will not show.  The game state is the same
+ * either way. */
+EMSCRIPTEN_KEEPALIVE void mvc2g_draw(int on) { r_set_discard(!on); }
 
 EMSCRIPTEN_KEEPALIVE const int16_t *mvc2g_audio(int frames)
 {
