@@ -89,6 +89,12 @@ Drawing per frame, i386 desktop build, `arcade_fight.txt`:
 | 32-bit blend, fog and floor | 16.9 |
 | Scalar-only inner loop | 16.3 |
 
+Those are means over the whole script, of which 1,450 frames are boot and
+menus. **Fight frames alone** (`MVC2_SWGL_STATS=1890`, 400 frames) take 20.0
+ms on i386, and 21.8 ms in the translated x86-64 build
+(`mvc2g_native --fuzz 3 --time-from 1900`, less the 1.5 ms game step). 60 fps
+needs the whole frame under 16.7 ms.
+
 A fight frame is about 5,000 triangles, 68,000 sprite fragments and 540,000
-stage-mesh fragments (bilinear, palette). In the translated build the
-rasteriser is 82% of the time and the game step 1 to 2 ms.
+stage-mesh fragments (bilinear, palette). The rasteriser is nearly all of the
+frame; the game step is 1 to 2 ms.

@@ -80,7 +80,8 @@ static void wav_header(FILE *f, unsigned bytes)
  * --wav writes the sound of the whole run (800 frames of 48 kHz stereo per game step);
  * --hash prints the state hash of every frame (the wasm comparison);
  * --mash presses START and CROSS in turn, which gets from the title into a fight;
- * --nodraw runs the game steps without drawing;
+ * --nodraw runs the game steps without drawing; --time-from N times only the
+ * steps from frame N on;
  * --fuzz SEED does that outside fights and presses random directions and
  * attack buttons inside them (state 2/1/2). */
 int main(int argc, char **argv)
@@ -94,7 +95,7 @@ int main(int argc, char **argv)
     const int a0 = 2;
 #endif
     struct w2c_wasi__snapshot__preview1 wasi = { &m };
-    long i, n = argc > a0 ? strtol(argv[a0], 0, 0) : 0, shot_at[16];
+    long i, n = argc > a0 ? strtol(argv[a0], 0, 0) : 0, shot_at[16], time_from = 0;
     const char *shot_file[16];
     int hash = 0, mash = 0, nshot = 0, a, fuzz = 0, nodraw = 0;
     unsigned rng = 1, held = 0;
@@ -108,6 +109,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[a], "--hash")) hash = 1;
         else if (!strcmp(argv[a], "--mash")) mash = 1;
         else if (!strcmp(argv[a], "--nodraw")) nodraw = 1;
+        else if (!strcmp(argv[a], "--time-from") && a + 1 < argc) time_from = strtol(argv[++a], 0, 0);
         else if (!strcmp(argv[a], "--fuzz") && a + 1 < argc) { fuzz = mash = 1; rng = (unsigned)strtoul(argv[++a], 0, 0) * 2654435761u + 1; }
         else if (!strcmp(argv[a], "--wav") && a + 1 < argc) { wav = fopen(argv[++a], "wb"); if (wav) wav_header(wav, 0); }
         else if (!strcmp(argv[a], "--shot") && a + 1 < argc && nshot < 16) {
@@ -145,7 +147,7 @@ int main(int argc, char **argv)
             fwrite(pcm, 1, 800 * 4, wav);
             wav_bytes += 800 * 4;
         }
-        step += now_sec() - t0;
+        if (i >= time_from) step += now_sec() - t0;
         if (hash)
             printf("%ld %08x %06x\n", i, w2c_mvc2g_mvc2g_state_hash(&m), w2c_mvc2g_mvc2g_game_state(&m));
         for (a = 0; a < nshot; a++)
@@ -160,7 +162,7 @@ int main(int argc, char **argv)
             }
     }
     if (wav) { wav_header(wav, wav_bytes); fclose(wav); }
-    fprintf(stderr, "[mvc2g] %ld frames, %.2f ms per frame (game step, drawing, sound), state %06x\n", n,
-            n ? step * 1000.0 / (double)n : 0.0, w2c_mvc2g_mvc2g_game_state(&m));
+    fprintf(stderr, "[mvc2g] %ld frames timed, %.2f ms per frame (game step, drawing, sound), state %06x\n",
+            n - time_from, n > time_from ? step * 1000.0 / (double)(n - time_from) : 0.0, w2c_mvc2g_mvc2g_game_state(&m));
     return 0;
 }

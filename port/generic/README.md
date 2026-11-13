@@ -69,7 +69,7 @@ so it needs GCC or Clang.
 | Picture | Draws title, menus, character select and fights; checked against the GL renderer in the desktop build ([SWGL.md](../docs/SWGL.md)) |
 | Sound | A 50 s run is silent for the 4 s of boot and has signal after. Not compared with the desktop mix |
 | Buttons | Player 1 and 2 pad bits; no analog sticks |
-| Speed, x86-64, translated C, `-O2` | 1.2 to 1.8 ms per step without drawing; 22.8 ms per frame with drawing before the scalar inner loop (not re-measured since). 60 fps needs 16.7 ms |
+| Speed, x86-64, translated C, `-O2` | Fight frames (`--fuzz 3 --time-from 1900`, 1300 frames): 23.3 ms per frame, of which the game step and sound are 1.5 ms. From boot through menus into a fight (`--mash`, 3000 frames): 21.5 ms. 60 fps needs 16.7 ms |
 | Other CPUs | Not built yet (arm64, a big-endian target) |
 
 Known gaps:
@@ -81,9 +81,10 @@ Known gaps:
   pipeline is integer. The same wasm gives the same floats everywhere, but a
   translation built with fused multiply-add or x87 would not: build with
   `-ffp-contract=off` on such targets.
-- `wasm2c` from wabt 1.0.34 is what was used. Its translation of the
-  rasteriser was slower than the same C compiled directly; if that stays
-  true, `swgl.c` can be compiled natively beside the translated game.
+- `wasm2c` from wabt 1.0.34 is what was used. The translation costs the
+  rasteriser little: fight frames draw in about 21.8 ms translated (x86-64)
+  against 20.0 ms for the same C compiled directly (i386). The rasteriser
+  itself is what has to get faster.
 
 ## Files
 
