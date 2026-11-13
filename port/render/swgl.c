@@ -622,13 +622,13 @@ static void vs_mesh(const MeshUni *m, const Vao *va, GLuint idx, VOut *o)
         }
         for (int ch = 0; ch < 3; ch++) {
             float v = m->lcol[ch] * d[0] + m->lcol[4 + ch] * d[1] + m->lcol[8 + ch] * d[2] + m->lamb[ch];
-            col[ch] = floorf((v < m->lclamp ? v : m->lclamp) * m->mod[ch]);
+            col[ch] = (float)ifloor((v < m->lclamp ? v : m->lclamp) * m->mod[ch]);
         }
-        col[3] = floorf(m->lamb[3] * m->mod[3]);
+        col[3] = (float)ifloor(m->lamb[3] * m->mod[3]);
     } else if (m->flags & 2) {
         memcpy(col, m->matcol, sizeof col);
     } else {
-        for (int ch = 0; ch < 4; ch++) col[ch] = floorf(ac[ch] * m->cscale[ch] * m->mod[ch]);
+        for (int ch = 0; ch < 4; ch++) col[ch] = (float)ifloor(ac[ch] * m->cscale[ch] * m->mod[ch]);
     }
     if (m->flags & 8) {
         o->v[1] = m->uv0[0] * uv[0] + m->uv1[0] * uv[1] + m->uv3[0];
@@ -748,36 +748,43 @@ static inline uint32_t fac16(GLenum f, uint32_t sa, uint32_t da)
     }
 }
 
-static inline uint8_t round16(int64_t v) /* 8.8 -> 8 bits, clamped */
+static inline uint8_t round16(int32_t v) /* 8.8 -> 8 bits, clamped */
 {
-    return v <= 0 ? 0 : v >= ONE16 ? 255 : (uint8_t)((v + 128) >> 8);
+    return v <= 0 ? 0 : v >= (int32_t)ONE16 ? 255 : (uint8_t)((v + 128) >> 8);
 }
+
+/* 8.8 (0..ONE16) -> a 15-bit weight (0..32768), so weight * 8.8 fits in 32 bits */
+static inline int32_t weight15(uint32_t v) { return (int32_t)((v * 32897u) >> 16); }
 
 static inline void write_pixel(uint8_t *p, const uint32_t s[4], int bl, int allmask)
 {
     if (allmask) {
         if (bl == BL_OFF) {
-            p[0] = round16(s[0]); p[1] = round16(s[1]); p[2] = round16(s[2]); p[3] = round16(s[3]);
+            p[0] = round16((int32_t)s[0]); p[1] = round16((int32_t)s[1]);
+            p[2] = round16((int32_t)s[2]); p[3] = round16((int32_t)s[3]);
             return;
         }
-        if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) */
-            const uint64_t sa = s[3], ia = ONE16 - s[3];
-            for (int k = 0; k < 4; k++)
-                p[k] = round16((int64_t)((s[k] * sa + ((uint64_t)p[k] << 8) * ia + ONE16 / 2) / ONE16));
+        if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) = d + (s - d) * sa */
+            const int32_t a = weight15(s[3]);
+            for (int k = 0; k < 4; k++) {
+                const int32_t d = (int32_t)p[k] << 8;
+                p[k] = round16(d + ((((int32_t)s[k] - d) * a + 16384) >> 15));
+            }
             return;
         }
         if (bl == BL_ADD) {
-            for (int k = 0; k < 4; k++) p[k] = round16((int64_t)s[k] + ((int64_t)p[k] << 8));
+            for (int k = 0; k < 4; k++) p[k] = round16((int32_t)s[k] + ((int32_t)p[k] << 8));
             return;
         }
     }
     {
         const uint32_t da = (uint32_t)p[3] << 8;
-        const int64_t sf = bl == BL_OFF ? ONE16 : fac16(G.bl_s, s[3], da), df = bl == BL_OFF ? 0 : fac16(G.bl_d, s[3], da);
+        const int32_t sf = weight15(bl == BL_OFF ? ONE16 : fac16(G.bl_s, s[3], da));
+        const int32_t df = weight15(bl == BL_OFF ? 0 : fac16(G.bl_d, s[3], da));
         for (int k = 0; k < 4; k++) {
-            const int64_t x = (int64_t)s[k] * sf, y = ((int64_t)p[k] << 8) * df;
-            const int64_t r = G.bl_eq == GL_FUNC_SUBTRACT ? x - y : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? y - x : x + y;
-            if (G.cmask[k]) p[k] = round16(r <= 0 ? 0 : (r + ONE16 / 2) / ONE16);
+            const int32_t x = ((int32_t)s[k] * sf + 16384) >> 15, y = (((int32_t)p[k] << 8) * df + 16384) >> 15;
+            const int32_t r = G.bl_eq == GL_FUNC_SUBTRACT ? x - y : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? y - x : x + y;
+            if (G.cmask[k]) p[k] = round16(r);
         }
     }
 }
@@ -801,8 +808,13 @@ typedef struct { double x, y; float z, iw; float v[NVAR]; } SV; /* v = varying /
 
 static inline int64_t floor64(double d)
 {
-    int64_t i = (int64_t)d;
-    return (double)i > d ? i - 1 : i;
+    if (d > -2147483000.0 && d < 2147483000.0) { /* the usual case, in 32 bits */
+        const int32_t i = (int32_t)d;
+        return (double)i > d ? i - 1 : i;
+    } else {
+        const int64_t i = (int64_t)d;
+        return (double)i > d ? i - 1 : i;
+    }
 }
 
 /* Texel coordinate -> 16.16.  A repeating coordinate is reduced into the
@@ -823,9 +835,9 @@ static inline int64_t floor64(double d)
 static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b, const SV *c, float flat)
 {
     /* 8 sub-pixel bits; edge functions in 64-bit integers */
-    int64_t x0 = (int64_t)floor(a->x * 256.0 + 0.5), y0 = (int64_t)floor(a->y * 256.0 + 0.5);
-    int64_t x1 = (int64_t)floor(b->x * 256.0 + 0.5), y1 = (int64_t)floor(b->y * 256.0 + 0.5);
-    int64_t x2 = (int64_t)floor(c->x * 256.0 + 0.5), y2 = (int64_t)floor(c->y * 256.0 + 0.5);
+    int64_t x0 = floor64(a->x * 256.0 + 0.5), y0 = floor64(a->y * 256.0 + 0.5);
+    int64_t x1 = floor64(b->x * 256.0 + 0.5), y1 = floor64(b->y * 256.0 + 0.5);
+    int64_t x2 = floor64(c->x * 256.0 + 0.5), y2 = floor64(c->y * 256.0 + 0.5);
     int64_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     int bx0, by0, bx1, by1, minx, miny, maxx, maxy;
     int64_t A[3], B[3], C[3];
@@ -1043,11 +1055,12 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                         o[3] = (int)(((int64_t)cfix[3] * 255 / 128) >> 8);
                     }
                     for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > (int)ONE16 ? (int)ONE16 : o[k];
-                    if (fogged) {
-                        int64_t f = cfix[4] >> 8;
-                        f = f < 0 ? 0 : f > ONE16 ? ONE16 : f;
-                        for (int k = 0; k < 3; k++)
-                            o[k] = (int)((((int64_t)fc->fog8[k] << 8) * (ONE16 - f) + (int64_t)o[k] * f + ONE16 / 2) / ONE16);
+                    if (fogged && cfix[4] < (int32_t)(255u << 16)) { /* 255 = no fog at this pixel */
+                        const int32_t f = weight15((uint32_t)(cfix[4] < 0 ? 0 : cfix[4] >> 8));
+                        for (int k = 0; k < 3; k++) { /* fog + (colour - fog) * f */
+                            const int32_t fg = (int32_t)fc->fog8[k] << 8;
+                            o[k] = fg + (((o[k] - fg) * f + 16384) >> 15);
+                        }
                     }
                     out[0] = (uint32_t)o[0]; out[1] = (uint32_t)o[1]; out[2] = (uint32_t)o[2]; out[3] = (uint32_t)o[3];
                 }
