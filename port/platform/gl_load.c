@@ -1,6 +1,7 @@
 #include "gl.h"
 #include <SDL.h>
 #include <stdio.h>
+#include "../render/swgl.h"
 
 static int s_is_es = 1;
 
@@ -38,7 +39,8 @@ void gl_clear_depth(float d)
 #ifdef GL_DIRECT
     glClearDepthf(d);
 #else
-    if (s_clear_depth) s_clear_depth(d);
+    if (swgl_active()) swgl_clear_depth(d);
+    else if (s_clear_depth) s_clear_depth(d);
     else if (s_clear_depthf) s_clear_depthf(d);
 #endif
 }

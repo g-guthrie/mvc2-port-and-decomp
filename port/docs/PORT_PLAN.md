@@ -99,11 +99,12 @@ Rollback netcode over WebRTC on the web and UDP natively. It relies on the
 deterministic logic step and on save/restore of the game state, which is a
 plain memory region on wasm32. Run-ahead's snapshot (`ra_save` / `ra_restore`) is that save/restore.
 
-### Later
-- A 64-bit native build: a 32-bit pointer arena, or `u32` handle fields
-  rewritten.
-- A native iOS/Android wrapper around the same web build, or the native
-  build with a Metal or GLES backend.
+### Later: the universal build
+The 64-bit question is answered without a pointer arena: the wasm32 build is
+translated to plain C (`wasm2c`), where the game's pointers are offsets into
+one block of memory, and the picture is drawn on the CPU. See
+[ROADMAP.md](../../ROADMAP.md), [port/generic](../generic/README.md) and
+[SWGL.md](SWGL.md).
 
 ## Personal single-file build
 

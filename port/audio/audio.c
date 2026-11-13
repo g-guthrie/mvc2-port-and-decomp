@@ -4,11 +4,15 @@
 #include "resample.h"
 #include "tsd.h"
 #include "tsd_client.h"
+/* PORT_NO_AUDIO_DEVICE: no SDL and no Web Audio; the host pulls samples with
+ * audio_render() (port/generic). */
+#ifndef PORT_NO_AUDIO_DEVICE
 #include <SDL.h>
+#endif
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(PORT_NO_AUDIO_DEVICE)
 #include <emscripten.h>
 #endif
 
@@ -37,7 +41,11 @@ static struct {
     int user_paused;
     float *wbuf;
     int wcap;
+#ifndef PORT_NO_AUDIO_DEVICE
     SDL_AudioDeviceID dev;
+#else
+    int dev;               /* always 0 */
+#endif
     int dev_rate;
     RsStream out_rs;       /* 48 kHz -> device rate */
     AudioAfsLoader loader;
@@ -47,8 +55,13 @@ static struct {
 } A;
 
 /* ---- locking ---- */
+#ifndef PORT_NO_AUDIO_DEVICE
 void audio_lock(void) { if (A.dev) SDL_LockAudioDevice(A.dev); }
 void audio_unlock(void) { if (A.dev) SDL_UnlockAudioDevice(A.dev); }
+#else
+void audio_lock(void) {}
+void audio_unlock(void) {}
+#endif
 
 /* ---- tsd_client sink: flush -> driver, status -> driver ---- */
 static void sink_rpc(void *ctx, const uint8_t *buf, size_t n)
@@ -206,6 +219,7 @@ void audio_render(float *out, int frames)
     }
 }
 
+#ifndef PORT_NO_AUDIO_DEVICE
 static int pull48(void *ctx, float *dst, int max)
 {
     (void)ctx;
@@ -221,13 +235,14 @@ static void SDLCALL device_cb(void *ud, Uint8 *stream, int len)
     if (A.dev_rate == AUDIO_RATE) audio_render(out, frames);
     else rs_stream_run(&A.out_rs, pull48, NULL, out, frames);
 }
+#endif
 
 void audio_set_master(float g) { audio_lock(); A.master = g; audio_unlock(); }
 void audio_set_music_volume(float g) { audio_lock(); A.music = g; audio_unlock(); }
 void audio_set_sfx_volume(float g) { audio_lock(); A.sfx = g; audio_unlock(); }
 int audio_device_rate(void) { return A.dev ? A.dev_rate : A.web ? A.web_rate : 0; }
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(PORT_NO_AUDIO_DEVICE)
 /* Web output (no SDL audio, whose ScriptProcessorNode is deprecated and runs
  * on the main thread): an AudioContext at 48 kHz feeding an AudioWorklet
  * that plays interleaved stereo blocks posted from the main thread.  The main
@@ -367,7 +382,7 @@ int audio_needs_manual_render(void) { return !A.dev; }
 
 int audio_unlocked(void)
 {
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(PORT_NO_AUDIO_DEVICE)
     return web_running();
 #else
     return 1;
@@ -377,11 +392,13 @@ int audio_unlocked(void)
 void audio_set_paused(int paused)
 {
     A.user_paused = paused != 0;
+#ifndef PORT_NO_AUDIO_DEVICE
 #ifdef __EMSCRIPTEN__
     if (A.web) web_suspend(paused);
 #endif
     if (!A.dev) return;
     SDL_PauseAudioDevice(A.dev, paused);
+#endif
 }
 
 void audio_set_loader(AudioAfsLoader fn, void *ctx) { A.loader = fn; A.loader_ctx = ctx; }
@@ -402,6 +419,9 @@ int audio_init(int open_device)
     tsdc_init();
     A.init = 1;
     if (!open_device) return 0;
+#ifdef PORT_NO_AUDIO_DEVICE
+    return -1;
+#else
 #ifdef __EMSCRIPTEN__
     A.web_rate = wa_open(AUDIO_RATE);
     if (A.web_rate <= 0) { A.web_rate = 0; return -1; }
@@ -432,12 +452,15 @@ int audio_init(int open_device)
     SDL_Log("audio: %d Hz, %d frames/buffer%s", have.freq, have.samples,
             have.freq == AUDIO_RATE ? "" : " (resampled from 48 kHz)");
     return 0;
+#endif
 }
 
 void audio_shutdown(void)
 {
     if (!A.init) return;
+#ifndef PORT_NO_AUDIO_DEVICE
     if (A.dev) SDL_CloseAudioDevice(A.dev);
+#endif
     A.dev = 0;
     tsdc_set_sink(NULL);
     tsd_shutdown(&A.tsd);
