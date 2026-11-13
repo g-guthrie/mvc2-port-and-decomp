@@ -1,0 +1,117 @@
+# Roadmap: the universal port
+
+## The goal
+
+One file that is *Marvel vs. Capcom 2*, and a handful of functions per
+device. "Can it run MvC2?" in the sense people ask it of Doom: the actual
+game, the same on everything.
+
+The game is a deterministic machine. Every 1/60 s it takes its state and the
+buttons held and gives the next state, one picture and 800 samples of sound.
+The ideal form of it is:
+
+- **One immutable file: rules plus content.** The rules are small (the
+  original's code is 3.3 MB of a 210 MB disc); the hand-drawn sprites, the
+  stages and the recorded sound are the size floor.
+- **A tiny machine to run it**, small enough to implement on any device in
+  an afternoon: integer instructions, a framebuffer, a sound buffer, buttons,
+  a clock.
+- **Integers only**, so the output is bit-identical everywhere.
+- **Shown equal to the original**, by proof where that is practical and by
+  measured fuzzing where it is not.
+
+## What "identical" means here
+
+**The reference is the arcade (NAOMI, Rev A).** Owner decision, 2026-11-13.
+
+What the project has established ([ARCADE_DIFF.md](port/docs/ARCADE_DIFF.md)
+sections 10 and 11):
+
+- The PS2 game's gameplay tables (animation scripts, boxes, attack records,
+  AI) are byte for byte what the Rev A arcade program runs. Checked for 36 of
+  59 characters; the rest could not be forced to load in the oracle.
+- The gameplay code differs in a few places that affect play, and the port
+  follows the arcade on each: Servbot's inputs in hit stop, the flying-screen
+  edge, the super-freeze tick order, float rounding, the sine routine.
+- The game code adds no input lag on either machine.
+
+So the inside of the file is the PS2-derived program with the arcade's rules.
+Finishing the NAOMI decompilation is **not** a prerequisite (owner decision,
+2026-11-13). Work on a specific NAOMI function when a question about arcade
+behaviour needs it.
+
+Open against "arcade identical":
+
+1. A side-by-side fight matches the arcade for 546 to 591 frames, then a
+   hit-stop count differs by one and positions by one float ulp during
+   Cyclops' super (BOOT_NOTES "Arcade oracle"). Not resolved.
+2. 23 characters' tables are not checked against the arcade program.
+3. 1,455 leads from the automatic screen of the per-character state code
+   were not read by hand (ARCADE_DIFF 10.5).
+4. The arcade picture (PowerVR) is not a target yet; the picture is the PS2
+   game's. Sound effects are the PS2's 8 kHz unless a Dreamcast disc is given.
+
+## Where it stands
+
+| Step | State |
+|---|---|
+| The game's own code running natively ([port/](port)) | Done: playable end to end, verified against the retail PS2 game over 1.1 million fuzzed frames |
+| One module with a five-function host ([port/generic](port/generic/README.md)) | Working: picture, sound and buttons; the plain-C translation matches the wasm frame for frame |
+| No GPU needed ([SWGL.md](port/docs/SWGL.md)) | Working: 99.9% of fight pixels within 2 levels of the GL renderer |
+| 60 fps in the translated build | Not yet: 22.8 ms per frame at last measurement (16.7 needed); the game step itself is 1 to 2 ms |
+| Other CPUs (arm64, big-endian) | Not started |
+| Personal build with the disc inside | Working (`EMBED=1`), for the disc's owner only |
+| A clean inside | Measured, not started (below) |
+
+## Simplifying the inside
+
+The module today is the whole PS2 program, translated. The ambition is a
+clean engine that produces the same game.
+
+**Method.** Never a from-scratch rewrite. Replace one subsystem at a time,
+run it next to the original on the same inputs, and compare every frame:
+the draw list, the sound commands and the gameplay state, not only pixels.
+The original stays as the oracle. The byte-exact decompilation trees are
+never edited for this.
+
+**What the game is made of** (`port/generic/coverage.sh`, six fuzzed arcade
+sessions of 60,000 frames, 2026-11-13):
+
+| Part of the original | Functions | Ran |
+|---|---|---|
+| Game code | 13,240 | 43% |
+| Main loop and tasks | 56 | 84% |
+| PS2 render library | 162 | 60% |
+| Engine services, effects, sound client | 246 | 39% |
+| CRI middleware | 147 | 30% |
+| Sony runtime / libc | 167 | 35% |
+
+- The shared gameplay core (0x176000 to 0x191000: player update, hits,
+  physics, edges) is about 440 functions.
+- The other roughly 12,000 game functions are small (median 15 lines of
+  translated C, 77% under 30) and run in patches, by character and effect.
+  They are per-character state code.
+- So: a small engine to write by hand, and thousands of small state
+  functions to convert mechanically into a table or script form. How regular
+  those functions are has not been examined yet; that is the next question.
+
+Limits of the measurement: functions, not branches; arcade mode only; player
+1 always the same team; the count of functions present is a floor (the
+optimiser merges small ones).
+
+**Proof.** A proof assistant fits the small pure pieces (fixed-point math,
+the damage formula, the input buffer, the animation-script interpreter) and
+the specification of the tiny machine. For most functions the cheaper tools
+come first: exhaustive checking where the input space is small, bounded model
+checking of one C function against another.
+
+## Order of work
+
+1. 60 fps in the translated build.
+2. arm64 and a big-endian build, same hash comparison.
+3. Widen the fuzzer (other modes, all characters) and record coverage per
+   character.
+4. Classify the per-character state functions; try a mechanical conversion on
+   one character.
+5. The first hand-written engine piece, behind the same comparison.
+6. Close the "arcade identical" list above.

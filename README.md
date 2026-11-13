@@ -3,15 +3,26 @@
 [![Progress report](https://github.com/g-guthrie/mvc2-port-and-decomp/actions/workflows/report.yml/badge.svg)](https://github.com/g-guthrie/mvc2-port-and-decomp/actions/workflows/report.yml)
 [![Code progress](https://decomp.dev/g-guthrie/mvc2-ps2-decomp.svg?mode=shield&measure=code&label=PS2%20code)](https://decomp.dev/g-guthrie/mvc2-ps2-decomp)
 
-*Marvel vs. Capcom 2: New Age of Heroes*, rebuilt from source:
+*Marvel vs. Capcom 2: New Age of Heroes*, rebuilt from source, on the way to
+one file that runs anywhere.
 
-| Part | Where | State |
-| --- | --- | --- |
-| **The port**: the game's own code on modern hardware, no emulator | [`port/`](port) | Playable end to end in the browser |
-| **PS2 decompilation** (NTSC-U `SLUS_204.86`) | [`src/`](src), [`config/`](config), [`tools/`](tools) | 99.93% of code, 99.99% of data; rebuilds the retail ELF byte for byte |
-| **Arcade (NAOMI) decompilation** | [`naomi/`](naomi) | In progress: 58.4% of the main image, 36.9% as verified C |
+**The aim** is a universal port: the actual game as one self-contained module
+plus a handful of functions per device, the same on everything, the way
+people ask "can it run Doom?". It plays by the arcade's rules. The plan and
+where it stands are in [ROADMAP.md](ROADMAP.md).
 
-No game data is in this repository. The port runs from your own disc.
+| Part | Where | State | How it is checked |
+| --- | --- | --- | --- |
+| **PS2 decompilation** (NTSC-U `SLUS_204.86`) | [`src/`](src), [`config/`](config), [`tools/`](tools) | 99.93% of code, 99.99% of data | Rebuilds the retail ELF byte for byte |
+| **Arcade (NAOMI) decompilation** | [`naomi/`](naomi) | In progress: 58.4% of the main image, 36.9% as verified C. Not needed for the port; worked on when a question about arcade behaviour needs it | Rebuilds the retail ROM bytes it covers |
+| **The port**: the game's own code, no emulator, in the browser and on the desktop | [`port/`](port) | Playable end to end | 1.1 million fuzzed frames equal to the retail PS2 game; compared with the arcade ROM |
+| **The universal build** (`mvc2g`): one module, five host functions, no GPU | [`port/generic/`](port/generic) | Picture, sound and buttons work; not yet 60 fps | The plain-C translation equals the wasm frame for frame; picture within 2 levels of the GL renderer on 99.9% of fight pixels |
+
+No game data is in this repository. Everything runs from your own disc.
+
+**New here?** Read [ROADMAP.md](ROADMAP.md) for the goal and the current
+state, then [AGENTS.md](AGENTS.md) for the map of the repository, how to set
+up a machine, and the rules of each part.
 
 ## The port
 
@@ -58,7 +69,26 @@ runs switch the arcade rules off, so that retail PS2 is a fair reference.
 | [BOOT_NOTES.md](port/docs/BOOT_NOTES.md) | How the port runs the game's code; every fix, with its evidence |
 | [PS2_GRIPES.md](port/docs/PS2_GRIPES.md) | Known complaints about the PS2 version, and what the port does about each |
 | [RENDERER.md](port/docs/RENDERER.md), [AUDIO.md](port/docs/AUDIO.md) | The graphics and sound layers |
-| [PORT_PLAN.md](port/docs/PORT_PLAN.md) | Phases and what is next (desktop builds) |
+| [PORT_PLAN.md](port/docs/PORT_PLAN.md) | The port's phases |
+
+## The universal build
+
+[`port/generic`](port/generic/README.md) links the game, the renderer and the
+sound mixer into one module that needs only: disc bytes in, a 640x480 picture
+out, sound samples out, buttons in, and a call 60 times a second. The picture
+is drawn on the CPU ([SWGL.md](port/docs/SWGL.md)), so no GPU or graphics
+library is involved. The module is translated to plain C with `wasm2c`, which
+compiles for any CPU and pointer size; the translation is checked against the
+wasm by a state hash every frame.
+
+A personal build can carry your disc inside it, so a device needs no file
+access at all. That build contains the game and is never committed or shared.
+
+| Document | Contents |
+| --- | --- |
+| [ROADMAP.md](ROADMAP.md) | The goal, what "identical to the arcade" means, what is done, what is next |
+| [port/generic/README.md](port/generic/README.md) | The host interface, building, testing, current numbers and gaps |
+| [SWGL.md](port/docs/SWGL.md) | The software renderer: how it works, accuracy and speed |
 
 ## PS2 decompilation
 
@@ -94,7 +124,10 @@ program. The arcade ROM is the reference for how the port plays. See
 
 | Path | Holds |
 | --- | --- |
-| `port/` | The port: host layer, renderer, audio, front ends, web shell, oracle tools |
+| `ROADMAP.md` | The goal and the state of the universal port |
+| `port/` | The port: host layer, renderer, audio, front ends, web shell |
+| `port/generic/` | The universal build (`mvc2g`), its hosts and its tests |
+| `port/tools/oracle*`, `port/tools/naomi_oracle` | The comparisons: retail PS2 state and sound, retail picture and sound, the arcade ROM |
 | `src/`, `config/`, `tools/`, `tests/` | PS2 decompilation: C sources, symbol and match catalogs, build and verification tools |
 | `naomi/` | NAOMI decompilation, self-contained |
 | `docs/` | PS2 decompilation notes; `docs/recovery/` holds the dated recovery records |
