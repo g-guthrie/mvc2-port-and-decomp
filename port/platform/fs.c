@@ -236,10 +236,59 @@ static int iso_walk(Iso *iso, uint32_t lba, uint32_t size, const char *prefix, i
     return 0;
 }
 
+/* ---- raw CD image over any source ----
+ * A .bin dump keeps 2352-byte sectors: the 2048 user bytes sit at +16
+ * (mode 1) or +24 (mode 2 form 1).  The PS2 disc is a CD, so this is its
+ * usual dump.  raw_wrap() turns such a source into a 2048-byte one, for a
+ * file, a memory block or the web page's File alike. */
+typedef struct { FsSource in; uint32_t hdr; } RawSrc;
+
+static size_t raw_read_at(void *ctx, uint64_t off, void *dst, size_t n)
+{
+    RawSrc *r = (RawSrc *)ctx;
+    uint8_t *o = (uint8_t *)dst;
+    size_t done = 0;
+    while (done < n) {
+        size_t in = (size_t)(off % SECTOR), k = SECTOR - in;
+        if (k > n - done) k = n - done;
+        uint64_t pos = off / SECTOR * 2352u + r->hdr + in;
+        size_t got = r->in.read_at(r->in.ctx, pos, o + done, k);
+        done += got;
+        off += got;
+        if (got != k) break;
+    }
+    return done;
+}
+
+static void raw_close(void *ctx)
+{
+    RawSrc *r = (RawSrc *)ctx;
+    if (r->in.close) r->in.close(r->in.ctx);
+    free(r);
+}
+
+static void raw_wrap(FsSource *src)
+{
+    uint8_t id[6];
+    if (src->read_at(src->ctx, 16 * SECTOR, id, 6) == 6 && !memcmp(id + 1, "CD001", 5)) return;
+    for (uint32_t hdr = 16; hdr <= 24; hdr += 8) {
+        if (src->read_at(src->ctx, 16 * 2352u + hdr, id, 6) != 6 || memcmp(id + 1, "CD001", 5)) continue;
+        RawSrc *r = (RawSrc *)calloc(1, sizeof *r);
+        r->in = *src;
+        r->hdr = hdr;
+        src->ctx = r;
+        src->read_at = raw_read_at;
+        src->close = raw_close;
+        src->size = src->size / 2352u * SECTOR;
+        return;
+    }
+}
+
 int iso_open(Iso *iso, FsSource src)
 {
     uint8_t pvd[SECTOR];
     memset(iso, 0, sizeof *iso);
+    raw_wrap(&src);
     iso->src = src;
     if (iso_sectors(iso, 16, 1, pvd) || memcmp(pvd + 1, "CD001", 5)) {
         fs_source_close(&iso->src);
