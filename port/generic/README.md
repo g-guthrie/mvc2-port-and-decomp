@@ -55,6 +55,24 @@ must be equal.
 does that outside fights and presses random directions and attacks inside
 them.
 
+**Another CPU.** The translated C and the host are plain C; cross-compile
+both and run the same comparison:
+
+```sh
+cd build/port-generic
+aarch64-linux-gnu-gcc -O1 -w -static -I/usr/share/wabt/wasm2c -I. ../../port/generic/host_w2c.c \
+    mvc2g_w2c.c /usr/share/wabt/wasm2c/wasm-rt-impl.c -lm -o mvc2g_arm64
+qemu-aarch64-static mvc2g_arm64 DISC 1200 --hash > arm64.txt && cmp wasm.txt arm64.txt
+```
+
+A big-endian target needs `-DWABT_BIG_ENDIAN=1` on every file. `wasm2c` then
+keeps the module's memory mirrored, which is why the host reads and writes
+it only through `m_get` / `m_put`, and why `build.sh` runs `fix_w2c.py` on
+the translation (wabt 1.0.34's `memory.fill` and `memory.copy` are wrong on
+big-endian without it). On Ubuntu the cross compilers remove the
+`gcc-multilib` package; the i386 desktop build then needs
+`ln -s x86_64-linux-gnu/asm /usr/include/asm`.
+
 **Personal build.** `EMBED=1` links your disc image into the program, so the
 device needs no file access at all: picture, sound, buttons and time. The
 result contains the game. It is written to `private/generic/` (ignored) and
@@ -70,7 +88,7 @@ so it needs GCC or Clang.
 | Sound | A 50 s run is silent for the 4 s of boot and has signal after. Not compared with the desktop mix |
 | Buttons | Player 1 and 2 pad bits; no analog sticks |
 | Speed, x86-64, translated C, `-O2` | Fight frames (`--fuzz 3 --time-from 1900`, 1300 frames): 23.3 ms per frame, of which the game step and sound are 1.5 ms. From boot through menus into a fight (`--mash`, 3000 frames): 21.5 ms. 60 fps needs 16.7 ms |
-| Other CPUs | Not built yet (arm64, a big-endian target) |
+| Other CPUs | **arm64** and **s390x (big-endian, 64-bit)**: the translated C, cross-compiled with GCC 13 and run under `qemu-user`, gives the same 1200 state hashes as the wasm (2026-11-13). Not run on real hardware of either kind; no 32-bit or non-GCC target tried |
 
 Known gaps:
 
@@ -94,4 +112,5 @@ Known gaps:
 | `host_w2c.c` | Native host for the translated C: test options, WAV and PPM output, the embedded-disc variant |
 | `run_node.mjs` | Node host for the `.wasm` (state hashes only) |
 | `build.sh` | Link, translate, build, compare |
+| `fix_w2c.py` | Big-endian patch for the translation's bulk memory helpers |
 | `coverage.sh`, `coverage_report.py` | Function coverage of the original game's code over fuzzed play |

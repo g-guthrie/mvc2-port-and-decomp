@@ -59,7 +59,7 @@ Open against "arcade identical":
 | One module with a five-function host ([port/generic](port/generic/README.md)) | Working: picture, sound and buttons; the plain-C translation matches the wasm frame for frame |
 | No GPU needed ([SWGL.md](port/docs/SWGL.md)) | Working: 99.9% of fight pixels within 2 levels of the GL renderer |
 | 60 fps in the translated build | Not yet: fight frames take 23.3 ms (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
-| Other CPUs (arm64, big-endian) | Not started |
+| Other CPUs | arm64 and big-endian s390x builds of the translated C give the same 1200 state hashes as the wasm, under emulation. No real device yet |
 | Personal build with the disc inside | Working (`EMBED=1`), for the disc's owner only |
 | A clean inside | Measured, not started (below) |
 
@@ -108,7 +108,8 @@ checking of one C function against another.
 ## Order of work
 
 1. 60 fps in the translated build.
-2. arm64 and a big-endian build, same hash comparison.
+2. ~~arm64 and a big-endian build, same hash comparison.~~ Done under
+   emulation (2026-11-13). Next: a real device, and a 32-bit target.
 3. Widen the fuzzer (other modes, all characters) and record coverage per
    character.
 4. Classify the per-character state functions; try a mechanical conversion on
