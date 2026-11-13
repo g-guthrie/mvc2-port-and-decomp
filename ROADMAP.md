@@ -99,6 +99,32 @@ Limits of the measurement: functions, not branches; arcade mode only; player
 1 always the same team; the count of functions present is a floor (the
 optimiser merges small ones).
 
+**How regular the state code is** (`port/tools/state_code_survey.py`, from
+the credited C of the 15,493 functions in 0x191000 to 0x3D0000, 2026-11-13):
+
+| Shape | Share |
+|---|---|
+| Table dispatch head (`jtbl[p[n]](p)`) | 15.4% |
+| Empty or constant return | 1.5% |
+| 1 to 4 statements | 22.8% |
+| 5 to 12 statements | 29.2% |
+| 13 to 40 statements | 25.5% |
+| Over 40 statements | 2.0% |
+| Source not located by the survey | 3.7% |
+
+- Median 6 statements per function.
+- 30,520 call sites. The ten most called functions take 46% of them and the
+  top 25 take 60%. 142 engine functions account for 68% of all call sites.
+- The two most called are the animation step (`func_00175700`, 4,796 sites)
+  and the animation start (`func_001757E0`, 3,978).
+
+So the per-character code is close to a script already: states selected
+through tables, each a few calls to about 150 engine primitives with
+constant arguments, and increments of state bytes. That is what makes a
+mechanical conversion to a table or bytecode plausible. Not yet examined:
+what the statements between the calls do (the survey counts them, it does
+not classify them), and the 2% of large functions.
+
 **Proof.** A proof assistant fits the small pure pieces (fixed-point math,
 the damage formula, the input buffer, the animation-script interpreter) and
 the specification of the tiny machine. For most functions the cheaper tools
