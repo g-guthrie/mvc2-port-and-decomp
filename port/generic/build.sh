@@ -22,7 +22,7 @@ OBJS=
 for f in generic/mvc2g.c host/fe/fe_render.c host/fe/fe_mesh.c host/fe/fe_char.c host/fe/fe_audio.c \
          render/r_gl.c render/r_char.c render/r_mesh.c render/decode.c render/r_font.c render/swgl.c \
          audio/adx.c audio/vag.c audio/hdbank.c audio/resample.c audio/synth.c audio/tsd.c audio/audio.c \
-         audio/wav.c audio/dcse.c platform/settings.c; do
+         audio/wav.c audio/dcse.c; do
     o="$OUT/$(basename "$f" .c).o"
     emcc -O2 -DPORT_SWGL -DPORT_NO_AUDIO_DEVICE -I"$ROOT/port/stubs" -I"$ROOT/port/host" -I"$ROOT/port/platform" -I"$EM/glue" \
         -c "$ROOT/port/$f" -o "$o"

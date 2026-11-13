@@ -37,6 +37,9 @@ int host_disc_open_source(FsSource src);
 #define EE_BSS_SIZE (0x00634380u - 0x004C2580u)
 #define EE_HEAP_SIZE (28u << 20)
 
+/* No settings store here: every setting keeps its default. */
+const char *settings_get(const char *key) { (void)key; return 0; }
+
 EMSCRIPTEN_KEEPALIVE int mvc2g_boot(double disc_size)
 {
     FsSource s;

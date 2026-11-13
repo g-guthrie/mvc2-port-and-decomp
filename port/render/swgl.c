@@ -642,11 +642,6 @@ static inline uint32_t mul255(uint32_t a, uint32_t b) /* round(a * b / 255) */
     return (t + (t >> 8)) >> 8;
 }
 
-static void to_u8(const float f[4], uint8_t o[4])
-{
-    for (int k = 0; k < 4; k++) o[k] = unorm8(f[k]);
-}
-
 /* What one draw call samples, resolved once: the texture, how to filter and
  * wrap it, and the palette row base for an index texture. */
 typedef struct {
@@ -724,42 +719,52 @@ static void samp_setup(const FragCtx *c, int row, Samp *sp)
 /* ---------------- output merger ---------------- */
 enum { BL_OFF, BL_ALPHA, BL_ADD, BL_GEN };
 
-static int factor(GLenum f, int sa, int da)
+/* Colours reach the blend with 8 fractional bits (0..ONE16), as GL blends the
+ * unrounded shader output; only the stored pixel is rounded to 8 bits. */
+#define ONE16 65280u /* 255 << 8 */
+
+static inline uint32_t fac16(GLenum f, uint32_t sa, uint32_t da)
 {
     switch (f) {
-    case GL_ONE: return 255;
+    case GL_ONE: return ONE16;
     case GL_SRC_ALPHA: return sa;
-    case GL_ONE_MINUS_SRC_ALPHA: return 255 - sa;
+    case GL_ONE_MINUS_SRC_ALPHA: return ONE16 - sa;
     case GL_DST_ALPHA: return da;
-    case GL_ONE_MINUS_DST_ALPHA: return 255 - da;
+    case GL_ONE_MINUS_DST_ALPHA: return ONE16 - da;
     default: return 0;
     }
 }
 
-static inline void write_pixel(uint8_t *p, const uint8_t s[4], int bl, int allmask)
+static inline uint8_t round16(int64_t v) /* 8.8 -> 8 bits, clamped */
+{
+    return v <= 0 ? 0 : v >= ONE16 ? 255 : (uint8_t)((v + 128) >> 8);
+}
+
+static inline void write_pixel(uint8_t *p, const uint32_t s[4], int bl, int allmask)
 {
     if (allmask) {
-        if (bl == BL_OFF) { memcpy(p, s, 4); return; }
+        if (bl == BL_OFF) {
+            p[0] = round16(s[0]); p[1] = round16(s[1]); p[2] = round16(s[2]); p[3] = round16(s[3]);
+            return;
+        }
         if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) */
-            uint32_t sa = s[3], ia = 255u - sa;
-            p[0] = (uint8_t)mul255(s[0], sa) + (uint8_t)mul255(p[0], ia);
-            p[1] = (uint8_t)mul255(s[1], sa) + (uint8_t)mul255(p[1], ia);
-            p[2] = (uint8_t)mul255(s[2], sa) + (uint8_t)mul255(p[2], ia);
-            p[3] = (uint8_t)mul255(s[3], sa) + (uint8_t)mul255(p[3], ia);
+            const uint64_t sa = s[3], ia = ONE16 - s[3];
+            for (int k = 0; k < 4; k++)
+                p[k] = round16((int64_t)((s[k] * sa + ((uint64_t)p[k] << 8) * ia + ONE16 / 2) / ONE16));
             return;
         }
         if (bl == BL_ADD) {
-            for (int k = 0; k < 4; k++) { int r = s[k] + p[k]; p[k] = (uint8_t)(r > 255 ? 255 : r); }
+            for (int k = 0; k < 4; k++) p[k] = round16((int64_t)s[k] + ((int64_t)p[k] << 8));
             return;
         }
     }
     {
-        int sf = bl == BL_OFF ? 255 : factor(G.bl_s, s[3], p[3]), df = bl == BL_OFF ? 0 : factor(G.bl_d, s[3], p[3]);
+        const uint32_t da = (uint32_t)p[3] << 8;
+        const int64_t sf = bl == BL_OFF ? ONE16 : fac16(G.bl_s, s[3], da), df = bl == BL_OFF ? 0 : fac16(G.bl_d, s[3], da);
         for (int k = 0; k < 4; k++) {
-            int a = s[k] * sf, b = p[k] * df;
-            int r = G.bl_eq == GL_FUNC_SUBTRACT ? a - b : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? b - a : a + b;
-            r = r <= 0 ? 0 : (r + 127) / 255;
-            if (G.cmask[k]) p[k] = (uint8_t)(r > 255 ? 255 : r);
+            const int64_t x = (int64_t)s[k] * sf, y = ((int64_t)p[k] << 8) * df;
+            const int64_t r = G.bl_eq == GL_FUNC_SUBTRACT ? x - y : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? y - x : x + y;
+            if (G.cmask[k]) p[k] = round16(r <= 0 ? 0 : (r + ONE16 / 2) / ONE16);
         }
     }
 }
@@ -827,7 +832,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     const int fogged = !batch && (fc->flags & 16);
     float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep, tw = 1.f, th = 1.f, half = 0.f;
     int affine, constcol, white = 0;
-    uint8_t cc[4] = { 255, 255, 255, 255 };
+    uint32_t cc16[4] = { ONE16, ONE16, ONE16, ONE16 }; /* vertex colour, 8.8 */
     Samp sp;
     if (area == 0) return;
     if (!batch && (a->v[0] > 0.f || b->v[0] > 0.f || c->v[0] > 0.f)) return; /* ADC: the GS skips this triangle */
@@ -879,9 +884,12 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     constcol = batch && d1[2] == 0.f && d2[2] == 0.f && d1[3] == 0.f && d2[3] == 0.f && d1[4] == 0.f &&
                d2[4] == 0.f && d1[5] == 0.f && d2[5] == 0.f;
     if (constcol) {
-        to_u8(&s0->v[2], cc);
-        white = (cc[0] & cc[1] & cc[2] & cc[3]) == 255;
-        if (!cc[3]) return; /* alpha 0: fails the alpha test */
+        for (int k = 0; k < 4; k++) {
+            const float v = s0->v[2 + k] * (float)ONE16 + 0.5f;
+            cc16[k] = v <= 0.f ? 0 : v >= (float)ONE16 ? ONE16 : (uint32_t)v;
+        }
+        white = cc16[0] == ONE16 && cc16[1] == ONE16 && cc16[2] == ONE16 && cc16[3] == ONE16;
+        if (cc16[3] < 128 / 255 + 1) return; /* alpha 0: nothing passes the alpha test */
     }
 
     for (int py = miny; py <= maxy; py++) {
@@ -931,7 +939,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         if (batch) {
             if (!constcol)
                 for (int k = 0; k < 4; k++) {
-                    cfix[k] = (int32_t)(var[2 + k] * (255.f * 65536.f)) + 32768;
+                    cfix[k] = (int32_t)(var[2 + k] * (255.f * 65536.f));
                     cstep[k] = (int32_t)(step[2 + k] * (255.f * 65536.f));
                 }
         } else {
@@ -939,7 +947,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 cfix[k] = (int32_t)(var[ci + k] * 65536.f);
                 cstep[k] = (int32_t)(step[ci + k] * 65536.f);
             }
-            cfix[4] = (int32_t)(var[7] * 65536.f) + 32768;
+            cfix[4] = (int32_t)(var[7] * 65536.f);
             cstep[4] = (int32_t)(step[7] * 65536.f);
         }
         row = t->c + ((size_t)py * t->w + xs) * 4;
@@ -980,7 +988,8 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
             for (int i = 0; i < len; i++, row += 4, uf += duf, vf += dvf, zfix += zfstep, cfix[0] += cstep[0],
                      cfix[1] += cstep[1], cfix[2] += cstep[2], cfix[3] += cstep[3], cfix[4] += cstep[4]) {
                 uint32_t zi = 0;
-                uint8_t tx[4], out[4];
+                uint8_t tx[4];
+                uint32_t out[4]; /* 8.8 */
                 if (do_z) {
                     zi = zfix <= 0 ? 0 : (uint32_t)(zfix >> 32);
                     if (zi > 0xFFFFFFu) zi = 0xFFFFFFu;
@@ -991,18 +1000,19 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 if (batch) {
                     if (white) {
                         if (!tx[3]) continue; /* GS TEST: alpha != 0 */
-                        memcpy(out, tx, 4);
+                        out[0] = (uint32_t)tx[0] << 8; out[1] = (uint32_t)tx[1] << 8;
+                        out[2] = (uint32_t)tx[2] << 8; out[3] = (uint32_t)tx[3] << 8;
                     } else {
                         if (!constcol)
                             for (int k = 0; k < 4; k++) {
-                                int v = cfix[k] >> 16;
-                                cc[k] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                                const int v = cfix[k] >> 8;
+                                cc16[k] = (uint32_t)(v < 0 ? 0 : v > (int)ONE16 ? (int)ONE16 : v);
                             }
-                        out[3] = (uint8_t)mul255(tx[3], cc[3]);
-                        if (!out[3]) continue;
-                        out[0] = (uint8_t)mul255(tx[0], cc[0]);
-                        out[1] = (uint8_t)mul255(tx[1], cc[1]);
-                        out[2] = (uint8_t)mul255(tx[2], cc[2]);
+                        out[3] = (tx[3] * cc16[3] + 127) / 255;
+                        if (out[3] < 128) continue; /* below 0.5 / 255 */
+                        out[0] = (tx[0] * cc16[0] + 127) / 255;
+                        out[1] = (tx[1] * cc16[1] + 127) / 255;
+                        out[2] = (tx[2] * cc16[2] + 127) / 255;
                     }
                 } else {
                     /* k_mfs: colour in byte units, 128 = 1.0 with a texture */
@@ -1010,22 +1020,23 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                     if (sp.on) {
                         const int ca = cfix[3] >> 12; /* colour * 16 */
                         if (tx[3] * ca < 255 * 16) continue;
-                        o[3] = (tx[3] * ca) >> 11;
-                        o[0] = (tx[0] * (cfix[0] >> 12)) >> 11;
-                        o[1] = (tx[1] * (cfix[1] >> 12)) >> 11;
-                        o[2] = (tx[2] * (cfix[2] >> 12)) >> 11;
+                        o[3] = (tx[3] * ca) >> 3;     /* t * colour / 128, 8.8 */
+                        o[0] = (tx[0] * (cfix[0] >> 12)) >> 3;
+                        o[1] = (tx[1] * (cfix[1] >> 12)) >> 3;
+                        o[2] = (tx[2] * (cfix[2] >> 12)) >> 3;
                     } else {
                         if (cfix[3] < 65536) continue;
-                        o[0] = (cfix[0] + 32768) >> 16; o[1] = (cfix[1] + 32768) >> 16; o[2] = (cfix[2] + 32768) >> 16;
-                        o[3] = (int)(((int64_t)cfix[3] * 255 / 128 + 32768) >> 16);
+                        o[0] = cfix[0] >> 8; o[1] = cfix[1] >> 8; o[2] = cfix[2] >> 8;
+                        o[3] = (int)(((int64_t)cfix[3] * 255 / 128) >> 8);
                     }
-                    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
+                    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > (int)ONE16 ? (int)ONE16 : o[k];
                     if (fogged) {
-                        int f = cfix[4] >> 16;
-                        f = f < 0 ? 0 : f > 255 ? 255 : f;
-                        for (int k = 0; k < 3; k++) o[k] = (fc->fog8[k] * (255 - f) + o[k] * f + 127) / 255;
+                        int64_t f = cfix[4] >> 8;
+                        f = f < 0 ? 0 : f > ONE16 ? ONE16 : f;
+                        for (int k = 0; k < 3; k++)
+                            o[k] = (int)((((int64_t)fc->fog8[k] << 8) * (ONE16 - f) + (int64_t)o[k] * f + ONE16 / 2) / ONE16);
                     }
-                    out[0] = (uint8_t)o[0]; out[1] = (uint8_t)o[1]; out[2] = (uint8_t)o[2]; out[3] = (uint8_t)o[3];
+                    out[0] = (uint32_t)o[0]; out[1] = (uint32_t)o[1]; out[2] = (uint32_t)o[2]; out[3] = (uint32_t)o[3];
                 }
                 if (zwrite) zrow[i] = zi;
                 write_pixel(row, out, bl, allmask);
