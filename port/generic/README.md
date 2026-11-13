@@ -87,7 +87,7 @@ so it needs GCC or Clang.
 | Picture | Draws title, menus, character select and fights; checked against the GL renderer in the desktop build ([SWGL.md](../docs/SWGL.md)) |
 | Sound | A 50 s run is silent for the 4 s of boot and has signal after. Not compared with the desktop mix |
 | Buttons | Player 1 and 2 pad bits; no analog sticks |
-| Speed, x86-64, translated C, `-O2` | Fight frames (`--fuzz 3 --time-from 1900`, 1300 frames): 23.3 ms per frame, of which the game step and sound are 1.5 ms. From boot through menus into a fight (`--mash`, 3000 frames): 21.5 ms. 60 fps needs 16.7 ms |
+| Speed, x86-64, translated C, `-O2` | Fight frames (`--fuzz 3 --time-from 1900`, 1300 frames): 20.4 ms per frame, of which the game step and sound are 1.5 ms (2.1 GHz server vCPU). From boot through menus into a fight (`--mash`, 3000 frames): 21.5 ms. 60 fps needs 16.7 ms |
 | Other CPUs | **arm64** and **s390x (big-endian, 64-bit)**: the translated C, cross-compiled with GCC 13 and run under `qemu-user`, gives the same 1200 state hashes as the wasm (2026-11-13). Not run on real hardware of either kind; no 32-bit or non-GCC target tried |
 
 Known gaps:

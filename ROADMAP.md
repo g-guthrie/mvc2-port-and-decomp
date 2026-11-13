@@ -58,7 +58,7 @@ Open against "arcade identical":
 | The game's own code running natively ([port/](port)) | Done: playable end to end, verified against the retail PS2 game over 1.1 million fuzzed frames |
 | One module with a five-function host ([port/generic](port/generic/README.md)) | Working: picture, sound and buttons; the plain-C translation matches the wasm frame for frame |
 | No GPU needed ([SWGL.md](port/docs/SWGL.md)) | Working: 99.9% of fight pixels within 2 levels of the GL renderer |
-| 60 fps in the translated build | Not yet: fight frames take 23.3 ms (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
+| 60 fps in the translated build | Not yet: fight frames take 20.4 ms on a 2.1 GHz server vCPU (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
 | Other CPUs | arm64 and big-endian s390x builds of the translated C give the same 1200 state hashes as the wasm, under emulation. No real device yet |
 | Personal build with the disc inside | Working (`EMBED=1`), for the disc's owner only |
 | A clean inside | Measured, not started (below) |
