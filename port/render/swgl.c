@@ -665,43 +665,54 @@ typedef struct {
     int dead;            /* 1: the texel is always transparent black */
 } Samp;
 
-/* Texel at 16.16 fixed-point texel coordinates (bilinear: already -0.5). */
-static inline void sample_fix(const Samp *sp, int32_t uf, int32_t vf, uint8_t o[4])
+/* The inner loop keeps everything in scalar locals (no arrays, no struct
+ * fields): pixel stores are byte stores, which the compiler must assume can
+ * change any object in memory, so anything read through a pointer in the loop
+ * is read again after every pixel.  Texels are packed R | G << 8 | B << 16 |
+ * A << 24. */
+static inline uint32_t rd_rgba(const uint8_t *p)
 {
-    const Tex *t = sp->t;
-    int i = uf >> 16, j = vf >> 16;
-    if (!sp->linear) {
-        memcpy(o, texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j), 4);
-    } else {
-        const uint8_t *c00, *c10, *c01, *c11;
-        uint32_t a = ((uint32_t)uf >> 8) & 255u, b = ((uint32_t)vf >> 8) & 255u;
-        uint32_t p00, p10, p01, p11, t0, t1, b0, b1, lo;
-        if (i >= 0 && j >= 0 && i + 1 < t->w && j + 1 < t->h && (!sp->pal || t->fmt == 1)) {
-            /* the four texels are inside the texture: no wrapping */
-            const size_t bpp = sp->pal ? 1 : 4;
-            const uint8_t *r0 = t->px + ((size_t)j * t->w + i) * bpp, *r1 = r0 + (size_t)t->w * bpp;
-            if (sp->pal) {
-                const uint8_t *pr = sp->pal->px + (size_t)sp->row * sp->pal->w * 4;
-                c00 = pr + 4 * r0[0]; c10 = pr + 4 * r0[1]; c01 = pr + 4 * r1[0]; c11 = pr + 4 * r1[1];
-            } else {
-                c00 = r0; c10 = r0 + 4; c01 = r1; c11 = r1 + 4;
-            }
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* One texel: an RGBA texture (prow == NULL) or an index texture through its
+ * palette atlas row (lut() of the shaders). */
+static inline uint32_t texel32(const uint8_t *px, int w, int h, int bpp, const uint8_t *prow, int cs, int ct, int i, int j)
+{
+    if ((unsigned)i >= (unsigned)w) i = wrapi(i, w, cs);
+    if ((unsigned)j >= (unsigned)h) j = wrapi(j, h, ct);
+    if (!prow) return rd_rgba(px + ((size_t)j * w + i) * 4);
+    return rd_rgba(prow + 4 * (size_t)px[((size_t)j * w + i) * bpp]);
+}
+
+/* Texel at 16.16 fixed-point texel coordinates (bilinear: already -0.5). */
+static inline uint32_t sample32(const uint8_t *px, int w, int h, int bpp, const uint8_t *prow, int lin, int cs, int ct,
+                                int32_t uf, int32_t vf)
+{
+    const int i = uf >> 16, j = vf >> 16;
+    uint32_t a, b, p00, p10, p01, p11, t0, t1, b0, b1;
+    if (!lin) return texel32(px, w, h, bpp, prow, cs, ct, i, j);
+    a = ((uint32_t)uf >> 8) & 255u; b = ((uint32_t)vf >> 8) & 255u;
+    if (i >= 0 && j >= 0 && i + 1 < w && j + 1 < h) { /* the four texels are inside the texture: no wrapping */
+        const size_t n = prow ? (size_t)bpp : 4;
+        const uint8_t *r0 = px + ((size_t)j * w + i) * n, *r1 = r0 + (size_t)w * n;
+        if (prow) {
+            p00 = rd_rgba(prow + 4 * (size_t)r0[0]); p10 = rd_rgba(prow + 4 * (size_t)r0[n]);
+            p01 = rd_rgba(prow + 4 * (size_t)r1[0]); p11 = rd_rgba(prow + 4 * (size_t)r1[n]);
         } else {
-            c00 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j);
-            c10 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i + 1, j);
-            c01 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j + 1);
-            c11 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i + 1, j + 1);
+            p00 = rd_rgba(r0); p10 = rd_rgba(r0 + 4); p01 = rd_rgba(r1); p11 = rd_rgba(r1 + 4);
         }
-        /* two channels per multiply: x and y lerps on the 0x00FF00FF halves */
-        memcpy(&p00, c00, 4); memcpy(&p10, c10, 4); memcpy(&p01, c01, 4); memcpy(&p11, c11, 4);
-        t0 = (((p00 & 0xFF00FFu) * (256u - a) + (p10 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
-        t1 = ((((p00 >> 8) & 0xFF00FFu) * (256u - a) + ((p10 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
-        b0 = (((p01 & 0xFF00FFu) * (256u - a) + (p11 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
-        b1 = ((((p01 >> 8) & 0xFF00FFu) * (256u - a) + ((p11 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
-        lo = ((t0 * (256u - b) + b0 * b + 0x800080u) >> 8) & 0xFF00FFu;
-        lo |= (t1 * (256u - b) + b1 * b + 0x800080u) & 0xFF00FF00u;
-        memcpy(o, &lo, 4);
+    } else {
+        p00 = texel32(px, w, h, bpp, prow, cs, ct, i, j); p10 = texel32(px, w, h, bpp, prow, cs, ct, i + 1, j);
+        p01 = texel32(px, w, h, bpp, prow, cs, ct, i, j + 1); p11 = texel32(px, w, h, bpp, prow, cs, ct, i + 1, j + 1);
     }
+    /* two channels per multiply: x and y lerps on the 0x00FF00FF halves */
+    t0 = (((p00 & 0xFF00FFu) * (256u - a) + (p10 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+    t1 = ((((p00 >> 8) & 0xFF00FFu) * (256u - a) + ((p10 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+    b0 = (((p01 & 0xFF00FFu) * (256u - a) + (p11 & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+    b1 = ((((p01 >> 8) & 0xFF00FFu) * (256u - a) + ((p11 >> 8) & 0xFF00FFu) * a + 0x800080u) >> 8) & 0xFF00FFu;
+    return (((t0 * (256u - b) + b0 * b + 0x800080u) >> 8) & 0xFF00FFu) |
+           ((t1 * (256u - b) + b1 * b + 0x800080u) & 0xFF00FF00u);
 }
 
 static void samp_setup(const FragCtx *c, int row, Samp *sp)
@@ -756,31 +767,34 @@ static inline uint8_t round16(int32_t v) /* 8.8 -> 8 bits, clamped */
 /* 8.8 (0..ONE16) -> a 15-bit weight (0..32768), so weight * 8.8 fits in 32 bits */
 static inline int32_t weight15(uint32_t v) { return (int32_t)((v * 32897u) >> 16); }
 
-static inline void write_pixel(uint8_t *p, const uint32_t s[4], int bl, int allmask)
+static inline void write_pixel(uint8_t *p, uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, int bl, int allmask)
 {
     if (allmask) {
         if (bl == BL_OFF) {
-            p[0] = round16((int32_t)s[0]); p[1] = round16((int32_t)s[1]);
-            p[2] = round16((int32_t)s[2]); p[3] = round16((int32_t)s[3]);
+            p[0] = round16((int32_t)s0); p[1] = round16((int32_t)s1);
+            p[2] = round16((int32_t)s2); p[3] = round16((int32_t)s3);
             return;
         }
         if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) = d + (s - d) * sa */
-            const int32_t a = weight15(s[3]);
-            for (int k = 0; k < 4; k++) {
-                const int32_t d = (int32_t)p[k] << 8;
-                p[k] = round16(d + ((((int32_t)s[k] - d) * a + 16384) >> 15));
-            }
+            const int32_t a = weight15(s3);
+            const int32_t d0 = (int32_t)p[0] << 8, d1 = (int32_t)p[1] << 8, d2 = (int32_t)p[2] << 8, d3 = (int32_t)p[3] << 8;
+            p[0] = round16(d0 + ((((int32_t)s0 - d0) * a + 16384) >> 15));
+            p[1] = round16(d1 + ((((int32_t)s1 - d1) * a + 16384) >> 15));
+            p[2] = round16(d2 + ((((int32_t)s2 - d2) * a + 16384) >> 15));
+            p[3] = round16(d3 + ((((int32_t)s3 - d3) * a + 16384) >> 15));
             return;
         }
         if (bl == BL_ADD) {
-            for (int k = 0; k < 4; k++) p[k] = round16((int32_t)s[k] + ((int32_t)p[k] << 8));
+            const int32_t d0 = (int32_t)p[0] << 8, d1 = (int32_t)p[1] << 8, d2 = (int32_t)p[2] << 8, d3 = (int32_t)p[3] << 8;
+            p[0] = round16((int32_t)s0 + d0); p[1] = round16((int32_t)s1 + d1);
+            p[2] = round16((int32_t)s2 + d2); p[3] = round16((int32_t)s3 + d3);
             return;
         }
     }
     {
-        const uint32_t da = (uint32_t)p[3] << 8;
-        const int32_t sf = weight15(bl == BL_OFF ? ONE16 : fac16(G.bl_s, s[3], da));
-        const int32_t df = weight15(bl == BL_OFF ? 0 : fac16(G.bl_d, s[3], da));
+        const uint32_t s[4] = { s0, s1, s2, s3 }, da = (uint32_t)p[3] << 8;
+        const int32_t sf = weight15(bl == BL_OFF ? ONE16 : fac16(G.bl_s, s3, da));
+        const int32_t df = weight15(bl == BL_OFF ? 0 : fac16(G.bl_d, s3, da));
         for (int k = 0; k < 4; k++) {
             const int32_t x = ((int32_t)s[k] * sf + 16384) >> 15, y = (((int32_t)p[k] << 8) * df + 16384) >> 15;
             const int32_t r = G.bl_eq == GL_FUNC_SUBTRACT ? x - y : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? y - x : x + y;
@@ -858,6 +872,10 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep, tw = 1.f, th = 1.f, half = 0.f;
     int affine, constcol, white = 0;
     uint32_t cc16[4] = { ONE16, ONE16, ONE16, ONE16 }; /* vertex colour, 8.8 */
+    uint32_t q0, q1, q2, q3;
+    const int32_t fog0 = (int32_t)fc->fog8[0] << 8, fog1 = (int32_t)fc->fog8[1] << 8, fog2 = (int32_t)fc->fog8[2] << 8;
+    const uint8_t *tpx = 0, *prow = 0;
+    int tex_on, lin, tcs, tct, txw = 1, txh = 1, tbpp = 4;
     Samp sp;
     if (area == 0) return;
     if (!batch && (a->v[0] > 0.f || b->v[0] > 0.f || c->v[0] > 0.f)) return; /* ADC: the GS skips this triangle */
@@ -917,6 +935,13 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         if (cc16[3] < 128 / 255 + 1) return; /* alpha 0: nothing passes the alpha test */
     }
 
+    q0 = cc16[0]; q1 = cc16[1]; q2 = cc16[2]; q3 = cc16[3];
+    tex_on = sp.on; lin = sp.linear; tcs = sp.cs; tct = sp.ct;
+    if (sp.on) {
+        tpx = sp.t->px; txw = sp.t->w; txh = sp.t->h; tbpp = sp.t->fmt;
+        prow = sp.pal ? sp.pal->px + (size_t)sp.row * sp.pal->w * 4 : 0;
+    }
+
     for (int py = miny; py <= maxy; py++) {
         const int64_t sy = (int64_t)py * 256 + 128, sx = (int64_t)minx * 256 + 128;
         int xs = minx, xe = maxx, empty = 0;
@@ -925,6 +950,7 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         double w1, w2;
         float z, iw, var[NVAR];
         int64_t zfix, zfstep;
+        int32_t c0, c1, c2, c3, c4, e0, e1, e2, e3, e4; /* colour and fog and their steps, 16.16 */
         int32_t cfix[5] = { 0, 0, 0, 0, 0 }, cstep[5] = { 0, 0, 0, 0, 0 }; /* colour (and fog), 16.16 */
         int px;
         /* the pixels of this row inside the three edges */
@@ -978,6 +1004,8 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         row = t->c + ((size_t)py * t->w + xs) * 4;
         zrow = do_z ? t->z + (size_t)py * t->w + xs : 0;
         px = xs;
+        c0 = cfix[0]; c1 = cfix[1]; c2 = cfix[2]; c3 = cfix[3]; c4 = cfix[4];
+        e0 = cstep[0]; e1 = cstep[1]; e2 = cstep[2]; e3 = cstep[3]; e4 = cstep[4];
         while (px <= xe) {
             /* one piece: texture coordinates exact at both ends, linear between */
             int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
@@ -1010,62 +1038,63 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
                 duf = (int32_t)(floor64(ub * 65536.0) - uf) / len;
                 dvf = (int32_t)(floor64(vb * 65536.0) - vf) / len;
             }
-            for (int i = 0; i < len; i++, row += 4, uf += duf, vf += dvf, zfix += zfstep, cfix[0] += cstep[0],
-                     cfix[1] += cstep[1], cfix[2] += cstep[2], cfix[3] += cstep[3], cfix[4] += cstep[4]) {
-                uint32_t zi = 0;
-                uint8_t tx[4];
-                uint32_t out[4]; /* 8.8 */
+            for (int i = 0; i < len; i++, row += 4, uf += duf, vf += dvf, zfix += zfstep, c0 += e0, c1 += e1,
+                     c2 += e2, c3 += e3, c4 += e4) {
+                uint32_t zi = 0, tx, tr, tg, tb, ta, o0, o1, o2, o3;
                 if (do_z) {
                     zi = zfix <= 0 ? 0 : (uint32_t)(zfix >> 32);
                     if (zi > 0xFFFFFFu) zi = 0xFFFFFFu;
                     if (!ztest(zf, zi, zrow[i])) continue;
                 }
-                if (sp.on) sample_fix(&sp, uf, vf, tx);
-                else tx[0] = tx[1] = tx[2] = tx[3] = 255;
+                tx = tex_on ? sample32(tpx, txw, txh, tbpp, prow, lin, tcs, tct, uf, vf) : 0xFFFFFFFFu;
+                tr = tx & 255u; tg = (tx >> 8) & 255u; tb = (tx >> 16) & 255u; ta = tx >> 24;
                 if (batch) {
                     if (white) {
-                        if (!tx[3]) continue; /* GS TEST: alpha != 0 */
-                        out[0] = (uint32_t)tx[0] << 8; out[1] = (uint32_t)tx[1] << 8;
-                        out[2] = (uint32_t)tx[2] << 8; out[3] = (uint32_t)tx[3] << 8;
+                        if (!ta) continue; /* GS TEST: alpha != 0 */
+                        o0 = tr << 8; o1 = tg << 8; o2 = tb << 8; o3 = ta << 8;
                     } else {
-                        if (!constcol)
-                            for (int k = 0; k < 4; k++) {
-                                const int v = cfix[k] >> 8;
-                                cc16[k] = (uint32_t)(v < 0 ? 0 : v > (int)ONE16 ? (int)ONE16 : v);
-                            }
-                        out[3] = (tx[3] * cc16[3] + 127) / 255;
-                        if (out[3] < 128) continue; /* below 0.5 / 255 */
-                        out[0] = (tx[0] * cc16[0] + 127) / 255;
-                        out[1] = (tx[1] * cc16[1] + 127) / 255;
-                        out[2] = (tx[2] * cc16[2] + 127) / 255;
+                        if (!constcol) {
+                            const int32_t v0 = c0 >> 8, v1 = c1 >> 8, v2 = c2 >> 8, v3 = c3 >> 8;
+                            q0 = (uint32_t)(v0 < 0 ? 0 : v0 > (int32_t)ONE16 ? (int32_t)ONE16 : v0);
+                            q1 = (uint32_t)(v1 < 0 ? 0 : v1 > (int32_t)ONE16 ? (int32_t)ONE16 : v1);
+                            q2 = (uint32_t)(v2 < 0 ? 0 : v2 > (int32_t)ONE16 ? (int32_t)ONE16 : v2);
+                            q3 = (uint32_t)(v3 < 0 ? 0 : v3 > (int32_t)ONE16 ? (int32_t)ONE16 : v3);
+                        }
+                        o3 = (ta * q3 + 127) / 255;
+                        if (o3 < 128) continue; /* below 0.5 / 255 */
+                        o0 = (tr * q0 + 127) / 255;
+                        o1 = (tg * q1 + 127) / 255;
+                        o2 = (tb * q2 + 127) / 255;
                     }
                 } else {
                     /* k_mfs: colour in byte units, 128 = 1.0 with a texture */
-                    int o[4];
-                    if (sp.on) {
-                        const int ca = cfix[3] >> 12; /* colour * 16 */
-                        if (tx[3] * ca < 255 * 16) continue;
-                        o[3] = (tx[3] * ca) >> 3;     /* t * colour / 128, 8.8 */
-                        o[0] = (tx[0] * (cfix[0] >> 12)) >> 3;
-                        o[1] = (tx[1] * (cfix[1] >> 12)) >> 3;
-                        o[2] = (tx[2] * (cfix[2] >> 12)) >> 3;
+                    int32_t m0, m1, m2, m3;
+                    if (tex_on) {
+                        const int32_t ca = c3 >> 12; /* colour * 16 */
+                        if ((int32_t)ta * ca < 255 * 16) continue;
+                        m3 = ((int32_t)ta * ca) >> 3;     /* t * colour / 128, 8.8 */
+                        m0 = ((int32_t)tr * (c0 >> 12)) >> 3;
+                        m1 = ((int32_t)tg * (c1 >> 12)) >> 3;
+                        m2 = ((int32_t)tb * (c2 >> 12)) >> 3;
                     } else {
-                        if (cfix[3] < 65536) continue;
-                        o[0] = cfix[0] >> 8; o[1] = cfix[1] >> 8; o[2] = cfix[2] >> 8;
-                        o[3] = (int)(((int64_t)cfix[3] * 255 / 128) >> 8);
+                        if (c3 < 65536) continue;
+                        m0 = c0 >> 8; m1 = c1 >> 8; m2 = c2 >> 8;
+                        m3 = (int32_t)(((int64_t)c3 * 255 / 128) >> 8);
                     }
-                    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > (int)ONE16 ? (int)ONE16 : o[k];
-                    if (fogged && cfix[4] < (int32_t)(255u << 16)) { /* 255 = no fog at this pixel */
-                        const int32_t f = weight15((uint32_t)(cfix[4] < 0 ? 0 : cfix[4] >> 8));
-                        for (int k = 0; k < 3; k++) { /* fog + (colour - fog) * f */
-                            const int32_t fg = (int32_t)fc->fog8[k] << 8;
-                            o[k] = fg + (((o[k] - fg) * f + 16384) >> 15);
-                        }
+                    m0 = m0 < 0 ? 0 : m0 > (int32_t)ONE16 ? (int32_t)ONE16 : m0;
+                    m1 = m1 < 0 ? 0 : m1 > (int32_t)ONE16 ? (int32_t)ONE16 : m1;
+                    m2 = m2 < 0 ? 0 : m2 > (int32_t)ONE16 ? (int32_t)ONE16 : m2;
+                    m3 = m3 < 0 ? 0 : m3 > (int32_t)ONE16 ? (int32_t)ONE16 : m3;
+                    if (fogged && c4 < (int32_t)(255u << 16)) { /* 255 = no fog at this pixel */
+                        const int32_t f = weight15((uint32_t)(c4 < 0 ? 0 : c4 >> 8));
+                        m0 = fog0 + (((m0 - fog0) * f + 16384) >> 15); /* fog + (colour - fog) * f */
+                        m1 = fog1 + (((m1 - fog1) * f + 16384) >> 15);
+                        m2 = fog2 + (((m2 - fog2) * f + 16384) >> 15);
                     }
-                    out[0] = (uint32_t)o[0]; out[1] = (uint32_t)o[1]; out[2] = (uint32_t)o[2]; out[3] = (uint32_t)o[3];
+                    o0 = (uint32_t)m0; o1 = (uint32_t)m1; o2 = (uint32_t)m2; o3 = (uint32_t)m3;
                 }
                 if (zwrite) zrow[i] = zi;
-                write_pixel(row, out, bl, allmask);
+                write_pixel(row, o0, o1, o2, o3, bl, allmask);
             }
             if (zrow) zrow += len;
             px += len;
