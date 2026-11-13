@@ -9,7 +9,7 @@ where the settings are stored.
 ## Starting
 
 **Browser.** Open `mvc2.html` from a web server, choose your disc image
-(`.iso`) once, and the page keeps it on this device (IndexedDB) for later
+(`.iso`, or a raw `.bin`) once, and the page keeps it on this device (IndexedDB) for later
 visits. Nothing is uploaded. "Forget cached disc" (on the first screen, or
 Settings > About) removes it.
 

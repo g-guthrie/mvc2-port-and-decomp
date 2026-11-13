@@ -27,7 +27,7 @@ const maxSec = +(process.env.MAXSEC || 580);
   });
   page.on('crash', () => { crashed = true; console.log('[crash] state', state); });
   page.on('pageerror', e => console.log('[pageerror]', e.message.slice(0, 300)));
-  let q = '?script=' + encodeURIComponent(script);
+  let q = (url.includes('?') ? '&' : '?') + 'script=' + encodeURIComponent(script); // URL may carry ?disc=...
   if (extra) q += '&args=' + encodeURIComponent(extra);
   await page.goto(url + q);
   const t0 = Date.now();

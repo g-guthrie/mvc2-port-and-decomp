@@ -1,7 +1,8 @@
 # Working on this repository
 
-**Start with [ROADMAP.md](ROADMAP.md)**: the goal (a universal port of the
-game), what "identical to the arcade" means, what is done and what is next.
+The browser port in `port/` is the product: it is what people play. **Read
+[ROADMAP.md](ROADMAP.md)** for the universal build (parked, 2026-11-13),
+what "identical to the arcade" means, and what was measured along the way.
 
 ## Map
 
@@ -10,7 +11,7 @@ game), what "identical to the arcade" means, what is done and what is next.
 | **PS2 decompilation** | `src/`, `config/`, `tools/`, `tests/`, `docs/` | this file (below) and [DECOMP.md](DECOMP.md) | Done but for 2,212 bytes ([REMAINING.md](REMAINING.md)) |
 | **NAOMI decompilation** | `naomi/` (self-contained) | [naomi/AGENTS.md](naomi/AGENTS.md) | 58%; not a prerequisite for the port, worked on when a question about arcade behaviour needs it |
 | **Port** (browser, desktop) | `port/` | [port/docs/BOOT_NOTES.md](port/docs/BOOT_NOTES.md) for how it runs the game's code; [USER_GUIDE.md](port/docs/USER_GUIDE.md) for building and test switches | Playable; verified against retail |
-| **Universal build** (`mvc2g`) | `port/generic/`, `port/render/swgl.c` | [port/generic/README.md](port/generic/README.md), [port/docs/SWGL.md](port/docs/SWGL.md) | Works; not yet 60 fps |
+| **Universal build** (`mvc2g`) | `port/generic/`, `port/render/swgl.c` | [port/generic/README.md](port/generic/README.md), [port/docs/SWGL.md](port/docs/SWGL.md) | Parked. Works on x86-64, arm64 and big-endian; not 60 fps in fights (frame skip covers it) |
 | **Comparisons** | `port/tools/oracle` (retail PS2 state and sound), `port/tools/oracle_av` (retail picture and sound), `port/tools/naomi_oracle` (arcade ROM), `port/generic/build.sh` (wasm against its C translation), `port/generic/coverage.sh` | their READMEs and [ORACLE_FUZZ.md](port/docs/ORACLE_FUZZ.md) | |
 
 Rules that hold everywhere:
@@ -64,6 +65,14 @@ ninja -C build/port-em mvc2_host mvc2
 
 # the universal build: link, translate to C, build, compare (about 7 minutes)
 port/generic/build.sh
+```
+
+Testing the browser build without a person (headless Chromium, Playwright):
+
+```sh
+# serve build/port-em as /app and your disc as /disc.bin on localhost, then
+node port/tools/web_script.js "http://127.0.0.1:8765/app/mvc2.html?disc=/disc.bin" OUT \
+    port/tools/scripts/arcade_fight.txt
 ```
 
 Things that cost time if you do not know them:

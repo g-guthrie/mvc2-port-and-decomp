@@ -1,5 +1,15 @@
 # Roadmap: the universal port
 
+> **Status: parked (owner decision, 2026-11-13).** The browser port
+> ([port/](port), [USER_GUIDE.md](port/docs/USER_GUIDE.md)) is what people
+> play: a link, your own disc, a phone or a computer. The universal build
+> below works and is kept as it is, but it is not being developed further.
+> It serves devices with no modern browser or GPU, which is a small
+> audience, and it cannot remove the need for each player's own disc. If
+> work resumes, "Order of work" at the end is where to start. The feature
+> players would notice most is online play with rollback
+> ([PORT_PLAN.md](port/docs/PORT_PLAN.md), phase 5).
+
 ## The goal
 
 One file that is *Marvel vs. Capcom 2*, and a handful of functions per
