@@ -60,6 +60,7 @@ Open against "arcade identical":
 | No GPU needed ([SWGL.md](port/docs/SWGL.md)) | Working: 99.9% of fight pixels within 2 levels of the GL renderer |
 | 60 fps in the translated build | Not yet: fight frames take 20.4 ms on a 2.1 GHz server vCPU (16.7 needed); the game step itself is 1.5 ms, the rest is drawing |
 | Other CPUs | arm64 and big-endian s390x builds of the translated C give the same 1200 state hashes as the wasm, under emulation. No real device yet |
+| A playable native host (SDL2, no GL) | Working headless: holds 60 game steps a second through a fight by not drawing some frames. Not yet played by a person |
 | Personal build with the disc inside | Working (`EMBED=1`), for the disc's owner only |
 | A clean inside | Measured, not started (below) |
 

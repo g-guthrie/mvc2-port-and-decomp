@@ -113,6 +113,7 @@ static void wav_header(FILE *f, unsigned bytes)
     fwrite(h, 1, 44, f);
 }
 
+#ifndef MVC2G_NO_MAIN /* host_sdl.c includes this file for the imports above */
 /* mvc2g_native DISC FRAMES [--hash] [--mash] [--wav FILE.wav] [--shot FRAME:FILE.ppm]...
  * --wav writes the sound of the whole run (800 frames of 48 kHz stereo per game step);
  * --hash prints the state hash of every frame (the wasm comparison);
@@ -207,3 +208,4 @@ int main(int argc, char **argv)
             n - time_from, n > time_from ? step * 1000.0 / (double)(n - time_from) : 0.0, w2c_mvc2g_mvc2g_game_state(&m));
     return 0;
 }
+#endif /* MVC2G_NO_MAIN */

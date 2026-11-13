@@ -47,6 +47,16 @@ EMBED=1 port/generic/build.sh         # also private/generic/mvc2g_personal (bel
 port/generic/coverage.sh              # which of the game's functions run in fuzzed play
 ```
 
+**Playing it.** `build/port-generic/mvc2g_sdl DISC [--scale N] [--fullscreen]`
+is the translated game in an SDL2 window with sound, keyboard and two game
+controllers ([`host_sdl.c`](host_sdl.c), 200 lines; no GL). Keys: arrows, A S
+punches, Z X kicks, D C assists, Enter start, right Shift select, Esc quits.
+The game always runs 60 steps a second; when the machine cannot draw that
+many pictures the host runs steps without drawing and shows the newest one.
+Checked headless only (`SDL_VIDEODRIVER=dummy`): 3000 steps into a fight
+took 50.1 s, with 2243 pictures shown and 758 steps not drawn, on a 2.1 GHz
+server vCPU. Nobody has played it in a window yet.
+
 `build.sh` runs the `.wasm` under node (`run_node.mjs`) and the translated C
 natively for 1200 frames and compares the state hash of every frame. They
 must be equal.
@@ -110,6 +120,7 @@ Known gaps:
 |---|---|
 | `mvc2g.c` | The entry points above |
 | `host_w2c.c` | Native host for the translated C: test options, WAV and PPM output, the embedded-disc variant |
+| `host_sdl.c` | The playable host: SDL2 window, sound, keyboard, controllers, frame skip |
 | `run_node.mjs` | Node host for the `.wasm` (state hashes only) |
 | `build.sh` | Link, translate, build, compare |
 | `fix_w2c.py` | Big-endian patch for the translation's bulk memory helpers |
