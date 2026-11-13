@@ -16,10 +16,13 @@
  * against -w <= z <= w, 24-bit depth, 8-bit RGBA colour, rows stored bottom
  * up as GL does.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "../platform/gl.h"
 #include "swgl.h"
 
@@ -164,10 +167,32 @@ static void bounds(const Target *t, int *x0, int *y0, int *x1, int *y1)
 static uint8_t unorm8(float f) { return f <= 0.f ? 0 : f >= 1.f ? 255 : (uint8_t)(f * 255.f + 0.5f); }
 static uint32_t depth24(float z) { return z <= 0.f ? 0 : z >= 1.f ? 0xFFFFFFu : (uint32_t)((double)z * 16777215.0 + 0.5); }
 
+/* MVC2_SWGL_STATS=N (testing): draw nothing before canvas frame N, then time
+ * the draw calls and print the mean per frame at exit. */
+static struct { long frame, from, frames; double sec, vsec; int on; long long visited, fb, fm, tris, verts; } St;
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+static void stats_report(void)
+{
+    if (St.frames > 0)
+        fprintf(stderr, "[swgl] %ld frames, %.2f ms of drawing per frame (%.2f ms vertex stage); per frame: %lld tris, %lld verts, "
+                "%lld pixels visited, %lld batch fragments, %lld mesh fragments\n", St.frames,
+                St.sec * 1000.0 / (double)St.frames, St.vsec * 1000.0 / (double)St.frames, St.tris / St.frames,
+                St.verts / St.frames, St.visited / St.frames, St.fb / St.frames, St.fm / St.frames);
+}
+
 static void GL_APIENTRY sw_glClear(GLbitfield mask)
 {
     Target t = target();
     int x0, y0, x1, y1;
+    if (G.fbo && (mask & GL_COLOR_BUFFER_BIT)) {
+        St.frame++;
+        if (St.on && St.frame > St.from) St.frames++;
+    }
     if (!t.c) return;
     bounds(&t, &x0, &y0, &x1, &y1);
     if (mask & GL_COLOR_BUFFER_BIT) {
@@ -454,60 +479,64 @@ static int wrapi(int i, int n, int clamp)
     return i < 0 ? i + n : i;
 }
 
-static void texel_rgba(const Tex *t, int i, int j, float o[4])
+/* One texel as RGBA8: an RGBA texture (pal == NULL) or an index texture
+ * through a palette atlas row (lut() of the shaders). */
+/* floor() as an int, without a libm call */
+static inline int ifloor(float x)
 {
-    const uint8_t *p = t->px + ((size_t)wrapi(j, t->h, t->clamp_t) * t->w + wrapi(i, t->w, t->clamp_s)) * 4;
-    o[0] = p[0] / 255.f; o[1] = p[1] / 255.f; o[2] = p[2] / 255.f; o[3] = p[3] / 255.f;
+    int i = (int)x;
+    return (float)i > x ? i - 1 : i;
 }
 
-/* texture(u_tex, uv) on an RGBA8 texture with no mip levels */
-static void sample_rgba(const Tex *t, float u, float v, float o[4])
+static const uint8_t *texel8(const Tex *t, const Tex *pal, int row, int cs, int ct, int i, int j)
 {
-    if (!t->linear) {
-        texel_rgba(t, (int)floorf(u * (float)t->w), (int)floorf(v * (float)t->h), o);
-    } else {
-        float x = u * (float)t->w - 0.5f, y = v * (float)t->h - 0.5f, fx = floorf(x), fy = floorf(y);
-        float a = x - fx, b = y - fy, c00[4], c10[4], c01[4], c11[4];
-        int i = (int)fx, j = (int)fy;
-        texel_rgba(t, i, j, c00); texel_rgba(t, i + 1, j, c10);
-        texel_rgba(t, i, j + 1, c01); texel_rgba(t, i + 1, j + 1, c11);
-        for (int k = 0; k < 4; k++)
-            o[k] = (c00[k] * (1.f - a) + c10[k] * a) * (1.f - b) + (c01[k] * (1.f - a) + c11[k] * a) * b;
-    }
+    static const uint8_t zero[4];
+    if ((unsigned)i >= (unsigned)t->w) i = wrapi(i, t->w, cs);
+    if ((unsigned)j >= (unsigned)t->h) j = wrapi(j, t->h, ct);
+    if (!pal) return t->px + ((size_t)j * t->w + i) * 4;
+    if ((unsigned)row >= (unsigned)pal->h) return zero;
+    return pal->px + ((size_t)row * pal->w + (t->fmt == 1 ? t->px[(size_t)j * t->w + i] : t->px[((size_t)j * t->w + i) * 4])) * 4;
 }
 
-/* lut() of the shaders: index texel through a palette atlas row */
-static void lut(const Tex *t, const Tex *pal, int row, int clamp, int i, int j, float o[4])
-{
-    const uint8_t *p;
-    int idx;
-    if (clamp) {
-        i = i < 0 ? 0 : i >= t->w ? t->w - 1 : i;
-        j = j < 0 ? 0 : j >= t->h ? t->h - 1 : j;
-    } else {
-        i = ((i % t->w) + t->w) % t->w;
-        j = ((j % t->h) + t->h) % t->h;
-    }
-    idx = t->fmt == 1 ? t->px[(size_t)j * t->w + i] : t->px[((size_t)j * t->w + i) * 4];
-    if (!pal || row < 0 || row >= pal->h) { o[0] = o[1] = o[2] = o[3] = 0.f; return; }
-    p = pal->px + ((size_t)row * pal->w + idx) * 4;
-    o[0] = p[0] / 255.f; o[1] = p[1] / 255.f; o[2] = p[2] / 255.f; o[3] = p[3] / 255.f;
-}
-
-static void sample_index(const Tex *t, const Tex *pal, int row, int linear, int clamp, float u, float v, float o[4])
+/* texture() / the shaders' hand-written index filter: nearest, or bilinear
+ * with 8-bit weights. */
+static void sample8(const Tex *t, const Tex *pal, int row, int linear, int cs, int ct, float u, float v, uint8_t o[4])
 {
     float x = u * (float)t->w, y = v * (float)t->h;
     if (!linear) {
-        lut(t, pal, row, clamp, (int)floorf(x), (int)floorf(y), o);
+        memcpy(o, texel8(t, pal, row, cs, ct, ifloor(x), ifloor(y)), 4);
     } else {
-        float fx, fy, a, b, c00[4], c10[4], c01[4], c11[4];
-        int i, j;
+        int i, j, a, b;
+        const uint8_t *c00, *c10, *c01, *c11;
         x -= 0.5f; y -= 0.5f;
-        fx = floorf(x); fy = floorf(y); a = x - fx; b = y - fy; i = (int)fx; j = (int)fy;
-        lut(t, pal, row, clamp, i, j, c00); lut(t, pal, row, clamp, i + 1, j, c10);
-        lut(t, pal, row, clamp, i, j + 1, c01); lut(t, pal, row, clamp, i + 1, j + 1, c11);
-        for (int k = 0; k < 4; k++)
-            o[k] = (c00[k] * (1.f - a) + c10[k] * a) * (1.f - b) + (c01[k] * (1.f - a) + c11[k] * a) * b;
+        i = ifloor(x); j = ifloor(y);
+        a = (int)((x - (float)i) * 256.f); b = (int)((y - (float)j) * 256.f);
+        if (i >= 0 && j >= 0 && i + 1 < t->w && j + 1 < t->h && (!pal || ((unsigned)row < (unsigned)pal->h && t->fmt == 1))) {
+            /* the four texels are inside the texture: no wrapping */
+            const uint8_t *r0 = t->px + ((size_t)j * t->w + i) * (pal ? 1 : 4), *r1 = r0 + (size_t)t->w * (pal ? 1 : 4);
+            if (pal) {
+                const uint8_t *pr = pal->px + (size_t)row * pal->w * 4;
+                c00 = pr + 4 * r0[0]; c10 = pr + 4 * r0[1]; c01 = pr + 4 * r1[0]; c11 = pr + 4 * r1[1];
+            } else {
+                c00 = r0; c10 = r0 + 4; c01 = r1; c11 = r1 + 4;
+            }
+        } else {
+            c00 = texel8(t, pal, row, cs, ct, i, j); c10 = texel8(t, pal, row, cs, ct, i + 1, j);
+            c01 = texel8(t, pal, row, cs, ct, i, j + 1); c11 = texel8(t, pal, row, cs, ct, i + 1, j + 1);
+        }
+        {
+            /* two channels per multiply: x and y lerps on the 0x00FF00FF halves */
+            uint32_t p00, p10, p01, p11, t0, t1, b0, b1, lo, hi;
+            memcpy(&p00, c00, 4); memcpy(&p10, c10, 4); memcpy(&p01, c01, 4); memcpy(&p11, c11, 4);
+            t0 = (((p00 & 0xFF00FFu) * (uint32_t)(256 - a) + (p10 & 0xFF00FFu) * (uint32_t)a) >> 8) & 0xFF00FFu;
+            t1 = ((((p00 >> 8) & 0xFF00FFu) * (uint32_t)(256 - a) + ((p10 >> 8) & 0xFF00FFu) * (uint32_t)a) >> 8) & 0xFF00FFu;
+            b0 = (((p01 & 0xFF00FFu) * (uint32_t)(256 - a) + (p11 & 0xFF00FFu) * (uint32_t)a) >> 8) & 0xFF00FFu;
+            b1 = ((((p01 >> 8) & 0xFF00FFu) * (uint32_t)(256 - a) + ((p11 >> 8) & 0xFF00FFu) * (uint32_t)a) >> 8) & 0xFF00FFu;
+            lo = ((t0 * (uint32_t)(256 - b) + b0 * (uint32_t)b + 0x800080u) >> 8) & 0xFF00FFu;
+            hi = (t1 * (uint32_t)(256 - b) + b1 * (uint32_t)b + 0x800080u) & 0xFF00FF00u;
+            lo |= hi;
+            memcpy(o, &lo, 4);
+        }
     }
 }
 
@@ -519,7 +548,7 @@ typedef struct {
     const Prog *g;
     const Tex *tex, *pal;
     int kind, mode, linear, clamp, flags, palrow;
-    float fogcol[3];
+    uint8_t fog8[3];
 } FragCtx;
 
 /* batch varyings: 0-1 uv, 2-5 colour * w, 6 w.  mesh: 0 adc, 1-2 uv, 3-6 colour * w, 7 fog * w, 8 w */
@@ -606,65 +635,93 @@ static void vs_mesh(const MeshUni *m, const Vao *va, GLuint idx, VOut *o)
     o->flat = 0.f;
 }
 
-/* Returns 0 for a discarded fragment. */
-static int fs_run(const FragCtx *c, const float *v, float flat, float o[4])
+/* ---------------- fragments ---------------- */
+static uint32_t mul255(uint32_t a, uint32_t b) /* round(a * b / 255) */
 {
-    float t[4] = { 1.f, 1.f, 1.f, 1.f };
-    if (c->kind == PK_BATCH) {
-        float iw = 1.f / v[6];
-        if (c->mode == 1 && c->tex) sample_rgba(c->tex, v[0], v[1], t);
-        else if (c->mode == 2 && c->tex) sample_index(c->tex, c->pal, (int)flat, c->linear, c->clamp, v[0], v[1], t);
-        for (int k = 0; k < 4; k++) o[k] = t[k] * v[2 + k] * iw;
-        return o[3] >= 0.5f / 255.f;
-    } else {
-        float iw, col[4], f;
-        if (v[0] > 0.f) return 0;
-        iw = 1.f / v[8];
-        for (int k = 0; k < 4; k++) col[k] = v[3 + k] * iw;
-        if (c->flags & 32) {
-            if (!c->tex) t[0] = t[1] = t[2] = t[3] = 0.f;
-            else if (c->mode == 2) sample_index(c->tex, c->pal, c->palrow, c->linear, c->clamp, v[1], v[2], t);
-            else sample_rgba(c->tex, v[1], v[2], t);
-            for (int k = 0; k < 4; k++) o[k] = t[k] * col[k] / 128.f;
+    uint32_t t = a * b + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
+static void to_u8(const float f[4], uint8_t o[4])
+{
+    for (int k = 0; k < 4; k++) o[k] = unorm8(f[k]);
+}
+
+/* Texel of the batch program (k_fs), 8 bits per channel. */
+static void batch_texel(const FragCtx *c, float u, float v, int row, uint8_t t[4])
+{
+    const Tex *x = c->tex;
+    if (c->mode == 1 && x) sample8(x, 0, 0, x->linear, x->clamp_s, x->clamp_t, u, v, t);
+    else if (c->mode == 2 && x && c->pal) sample8(x, c->pal, row, c->linear, c->clamp, c->clamp, u, v, t);
+    else if (c->mode == 2) t[0] = t[1] = t[2] = t[3] = 0;
+    else t[0] = t[1] = t[2] = t[3] = 255;
+}
+
+/* The mesh program's fragment shader (k_mfs).  col and fog are in the
+ * shader's byte units (colour 128 = 1.0 with a texture).  Returns 0 for a
+ * discarded fragment. */
+static int mesh_frag(const FragCtx *c, float u, float v, const float col[4], float fog, uint8_t out[4])
+{
+    int o[4];
+    if (c->flags & 32) {
+        uint8_t t[4];
+        int ca = (int)(col[3] * 16.f);
+        if (!c->tex) return 0;
+        if (c->mode == 2) {
+            if (!c->pal) return 0;
+            sample8(c->tex, c->pal, c->palrow, c->linear, c->clamp, c->clamp, u, v, t);
         } else {
-            o[0] = col[0] / 255.f; o[1] = col[1] / 255.f; o[2] = col[2] / 255.f; o[3] = col[3] / 128.f;
+            sample8(c->tex, 0, 0, c->tex->linear, c->tex->clamp_s, c->tex->clamp_t, u, v, t);
         }
-        for (int k = 0; k < 3; k++)
-            if (o[k] > 1.f) o[k] = 1.f;
-        if (o[3] > 255.f / 128.f) o[3] = 255.f / 128.f;
-        if (o[3] * 128.f < 1.f) return 0;
-        f = v[7] * iw / 255.f;
-        for (int k = 0; k < 3; k++) o[k] = c->fogcol[k] * (1.f - f) + o[k] * f;
-        return 1;
+        if (t[3] * ca < 255 * 16) return 0;         /* GS TEST alpha != 0 */
+        o[3] = (t[3] * ca) >> 11;
+        for (int k = 0; k < 3; k++) o[k] = (t[k] * (int)(col[k] * 16.f)) >> 11; /* t * col / 128 */
+    } else {
+        if (col[3] < 1.f) return 0;
+        o[0] = (int)(col[0] + 0.5f); o[1] = (int)(col[1] + 0.5f); o[2] = (int)(col[2] + 0.5f);
+        o[3] = (int)(col[3] * (255.f / 128.f) + 0.5f);
     }
+    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
+    if (c->flags & 16) {
+        int f = (int)(fog + 0.5f);
+        f = f < 0 ? 0 : f > 255 ? 255 : f;
+        for (int k = 0; k < 3; k++) o[k] = (c->fog8[k] * (255 - f) + o[k] * f + 127) / 255;
+    }
+    out[0] = (uint8_t)o[0]; out[1] = (uint8_t)o[1]; out[2] = (uint8_t)o[2]; out[3] = (uint8_t)o[3];
+    return 1;
 }
 
 /* ---------------- output merger ---------------- */
-static float factor(GLenum f, float sa, float da)
+static int factor(GLenum f, int sa, int da)
 {
     switch (f) {
-    case GL_ONE: return 1.f;
+    case GL_ONE: return 255;
     case GL_SRC_ALPHA: return sa;
-    case GL_ONE_MINUS_SRC_ALPHA: return 1.f - sa;
+    case GL_ONE_MINUS_SRC_ALPHA: return 255 - sa;
     case GL_DST_ALPHA: return da;
-    case GL_ONE_MINUS_DST_ALPHA: return 1.f - da;
-    default: return 0.f;
+    case GL_ONE_MINUS_DST_ALPHA: return 255 - da;
+    default: return 0;
     }
 }
 
-static void write_pixel(uint8_t *p, float s[4])
+static void write_pixel(uint8_t *p, const uint8_t s[4])
 {
-    for (int k = 0; k < 4; k++) s[k] = s[k] < 0.f ? 0.f : s[k] > 1.f ? 1.f : s[k];
-    if (G.blend) {
-        float d[4] = { p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f };
-        float sf = factor(G.bl_s, s[3], d[3]), df = factor(G.bl_d, s[3], d[3]);
+    if (!G.blend) {
+        if (G.cmask[0] & G.cmask[1] & G.cmask[2] & G.cmask[3]) memcpy(p, s, 4);
+        else
+            for (int k = 0; k < 4; k++)
+                if (G.cmask[k]) p[k] = s[k];
+        return;
+    }
+    {
+        int sf = factor(G.bl_s, s[3], p[3]), df = factor(G.bl_d, s[3], p[3]);
         for (int k = 0; k < 4; k++) {
-            float a = s[k] * sf, b = d[k] * df;
-            s[k] = G.bl_eq == GL_FUNC_SUBTRACT ? a - b : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? b - a : a + b;
+            int a = s[k] * sf, b = p[k] * df;
+            int r = G.bl_eq == GL_FUNC_SUBTRACT ? a - b : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? b - a : a + b;
+            r = r <= 0 ? 0 : (r + 127) / 255;
+            if (G.cmask[k]) p[k] = (uint8_t)(r > 255 ? 255 : r);
         }
     }
-    for (int k = 0; k < 4; k++)
-        if (G.cmask[k]) p[k] = unorm8(s[k]);
 }
 
 static int ztest(uint32_t z, uint32_t old)
@@ -684,6 +741,10 @@ static int ztest(uint32_t z, uint32_t old)
 /* ---------------- triangles ---------------- */
 typedef struct { double x, y; float z, iw; float v[NVAR]; } SV; /* v = varying / w */
 
+/* Varyings divided by w are linear in screen space.  colour * w and fog * w
+ * divided by w are the colour and the fog themselves, so only the texture
+ * coordinates need the per-pixel divide (and not even that when w is the
+ * same at the three vertices, as it is for every 2D draw). */
 static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b, const SV *c, float flat)
 {
     /* 8 sub-pixel bits; edge functions in 64-bit integers */
@@ -693,8 +754,15 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     int64_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     int bx0, by0, bx1, by1, minx, miny, maxx, maxy;
     int64_t A0, B0, C0, A1, B1, C1, A2, B2, C2;
+    int tie0, tie1, tie2;
     double inv;
     const SV *s0 = a, *s1 = b, *s2 = c;
+    const int batch = fc->kind == PK_BATCH, nvar = batch ? 6 : 8, row_pal = (int)flat;
+    const int ui = batch ? 0 : 1, ci = batch ? 2 : 3;
+    const int do_z = t->z && G.depth, zwrite = do_z && G.zmask;
+    float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep;
+    int affine, constcol;
+    uint8_t cc[4] = { 255, 255, 255, 255 };
     if (area == 0) return;
     if (area < 0) { /* make it counter-clockwise in the y-up frame */
         int64_t tx = x1, ty = y1;
@@ -722,35 +790,72 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     A0 = y1 - y2; B0 = x2 - x1; C0 = x1 * y2 - x2 * y1;
     A1 = y2 - y0; B1 = x0 - x2; C1 = x2 * y0 - x0 * y2;
     A2 = y0 - y1; B2 = x1 - x0; C2 = x0 * y1 - x1 * y0;
+    /* top-left rule (y up): a zero edge counts when it is a left edge or a top edge */
+    tie0 = A0 > 0 || (A0 == 0 && B0 < 0);
+    tie1 = A1 > 0 || (A1 == 0 && B1 < 0);
+    tie2 = A2 > 0 || (A2 == 0 && B2 < 0);
     inv = 1.0 / (double)area;
+    /* X(px, py) = X0 + w1 (X1 - X0) + w2 (X2 - X0); one pixel to the right adds `step` */
+#define GRAD(D1, D2) (float)(256.0 * inv * ((double)A1 * (double)(D1) + (double)A2 * (double)(D2)))
+    for (int k = 0; k < nvar; k++) {
+        d1[k] = s1->v[k] - s0->v[k];
+        d2[k] = s2->v[k] - s0->v[k];
+        step[k] = GRAD(d1[k], d2[k]);
+    }
+    dz1 = s1->z - s0->z; dz2 = s2->z - s0->z; zstep = GRAD(dz1, dz2);
+    diw1 = s1->iw - s0->iw; diw2 = s2->iw - s0->iw; iwstep = GRAD(diw1, diw2);
+#undef GRAD
+    affine = diw1 == 0.f && diw2 == 0.f;
+    constcol = batch && d1[2] == 0.f && d2[2] == 0.f && d1[3] == 0.f && d2[3] == 0.f && d1[4] == 0.f &&
+               d2[4] == 0.f && d1[5] == 0.f && d2[5] == 0.f;
+    if (constcol) to_u8(&s0->v[2], cc);
+
     for (int py = miny; py <= maxy; py++) {
-        int64_t sy = (int64_t)py * 256 + 128;
+        int64_t sy = (int64_t)py * 256 + 128, sx = (int64_t)minx * 256 + 128;
+        int64_t e0 = A0 * sx + B0 * sy + C0, e1 = A1 * sx + B1 * sy + C1, e2 = A2 * sx + B2 * sy + C2;
         uint8_t *row = t->c + (size_t)py * t->w * 4;
-        uint32_t *zrow = t->z ? t->z + (size_t)py * t->w : 0;
-        for (int px = minx; px <= maxx; px++) {
-            int64_t sx = (int64_t)px * 256 + 128;
-            int64_t e0 = A0 * sx + B0 * sy + C0, e1 = A1 * sx + B1 * sy + C1, e2 = A2 * sx + B2 * sy + C2;
-            double w1, w2;
-            float z, iw, var[NVAR], col[4];
+        uint32_t *zrow = do_z ? t->z + (size_t)py * t->w : 0;
+        float z = 0.f, iw = 0.f, var[NVAR];
+        int started = 0;
+        for (int px = minx; px <= maxx; px++, e0 += A0 * 256, e1 += A1 * 256, e2 += A2 * 256) {
             uint32_t zi = 0;
-            /* top-left rule (y up): a zero edge counts when it is a left edge or a top edge */
-            if (e0 < 0 || e1 < 0 || e2 < 0) continue;
-            if (e0 == 0 && !(A0 > 0 || (A0 == 0 && B0 < 0))) continue;
-            if (e1 == 0 && !(A1 > 0 || (A1 == 0 && B1 < 0))) continue;
-            if (e2 == 0 && !(A2 > 0 || (A2 == 0 && B2 < 0))) continue;
-            w1 = (double)e1 * inv; w2 = (double)e2 * inv;
-            /* v0 + w1 (v1 - v0) + w2 (v2 - v0): equal inputs give exactly that value */
-            z = s0->z + (float)(w1 * (double)(s1->z - s0->z) + w2 * (double)(s2->z - s0->z));
-            if (zrow && G.depth) {
+            uint8_t out[4];
+            float u, v;
+            if (e0 < 0 || e1 < 0 || e2 < 0 || (e0 == 0 && !tie0) || (e1 == 0 && !tie1) || (e2 == 0 && !tie2)) {
+                if (started) break; /* convex: the span has ended */
+                continue;
+            }
+            if (!started) {
+                double w1 = (double)e1 * inv, w2 = (double)e2 * inv;
+                z = s0->z + (float)(w1 * (double)dz1 + w2 * (double)dz2);
+                iw = s0->iw + (float)(w1 * (double)diw1 + w2 * (double)diw2);
+                for (int k = 0; k < nvar; k++) var[k] = s0->v[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
+                started = 1;
+            } else {
+                z += zstep; iw += iwstep;
+                for (int k = 0; k < nvar; k++) var[k] += step[k];
+            }
+            if (do_z) {
                 zi = depth24(z);
                 if (!ztest(zi, zrow[px])) continue;
             }
-            iw = s0->iw + (float)(w1 * (double)(s1->iw - s0->iw) + w2 * (double)(s2->iw - s0->iw));
-            for (int k = 0; k < NVAR; k++)
-                var[k] = (s0->v[k] + (float)(w1 * (double)(s1->v[k] - s0->v[k]) + w2 * (double)(s2->v[k] - s0->v[k]))) / iw;
-            if (!fs_run(fc, var, flat, col)) continue;
-            if (zrow && G.depth && G.zmask) zrow[px] = zi;
-            write_pixel(row + (size_t)px * 4, col);
+            if (affine) { float w = 1.f / s0->iw; u = var[ui] * w; v = var[ui + 1] * w; }
+            else { float w = 1.f / iw; u = var[ui] * w; v = var[ui + 1] * w; }
+            if (batch) {
+                uint8_t tx[4];
+                batch_texel(fc, u, v, row_pal, tx);
+                if (!constcol) to_u8(&var[2], cc);
+                out[3] = (uint8_t)mul255(tx[3], cc[3]);
+                if (!out[3]) continue; /* GS TEST: alpha != 0 */
+                out[0] = (uint8_t)mul255(tx[0], cc[0]);
+                out[1] = (uint8_t)mul255(tx[1], cc[1]);
+                out[2] = (uint8_t)mul255(tx[2], cc[2]);
+            } else {
+                if (var[0] > 0.f) continue; /* ADC */
+                if (!mesh_frag(fc, u, v, &var[ci], var[7], out)) continue;
+            }
+            if (zwrite) zrow[px] = zi;
+            write_pixel(row + (size_t)px * 4, out);
         }
     }
 }
@@ -810,22 +915,14 @@ static void present(const Prog *g, const Target *t)
     for (int y = G.vp[1]; y < G.vp[1] + G.vp[3]; y++) {
         if (y < 0 || y >= t->h) continue;
         for (int x = G.vp[0]; x < G.vp[0] + G.vp[2]; x++) {
-            float u, v, c[4];
-            uint8_t *o;
+            float u, v;
+            uint8_t *o, c[4];
             if (x < 0 || x >= t->w) continue;
             u = (rect[0] + ((float)(x - G.vp[0]) + 0.5f) / (float)G.vp[2] * rect[2]) / tsz[0];
             v = (rect[1] + ((float)(y - G.vp[1]) + 0.5f) / (float)G.vp[3] * rect[3]) / tsz[1];
-            if (smooth) {
-                Tex tmp = *src;
-                tmp.linear = 1; tmp.clamp_s = tmp.clamp_t = 1;
-                sample_rgba(&tmp, u, v, c);
-            } else {
-                Tex tmp = *src;
-                tmp.linear = 0; tmp.clamp_s = tmp.clamp_t = 1;
-                sample_rgba(&tmp, u, v, c);
-            }
+            sample8(src, 0, 0, smooth, 1, 1, u, v, c);
             o = t->c + ((size_t)y * t->w + x) * 4;
-            o[0] = unorm8(c[0]); o[1] = unorm8(c[1]); o[2] = unorm8(c[2]); o[3] = 255;
+            o[0] = c[0]; o[1] = c[1]; o[2] = c[2]; o[3] = 255;
         }
     }
 }
@@ -840,7 +937,12 @@ static void draw(GLenum mode, GLsizei count, const GLuint *idx, GLint first)
     MeshUni mu;
     VOut *vo;
     GLuint lo = 0xFFFFFFFFu, hi = 0;
+    double t0 = 0.0;
     if (!g || !t.c || count <= 0) return;
+    if (St.on) {
+        if (St.frame <= St.from) return;
+        t0 = now_sec();
+    }
     if (g->kind == PK_PRESENT) { present(g, &t); return; }
     if (mode != GL_TRIANGLES) return;
     memset(&fc, 0, sizeof fc);
@@ -851,7 +953,7 @@ static void draw(GLenum mode, GLsizei count, const GLuint *idx, GLint first)
         mesh_uniforms(g, &mu);
         fc.flags = mu.flags;
         fc.palrow = (int)uni(g, "u_palrow")->f[0];
-        memcpy(fc.fogcol, uni(g, "u_fogcol")->f, sizeof fc.fogcol);
+        for (int k = 0; k < 3; k++) fc.fog8[k] = unorm8(uni(g, "u_fogcol")->f[k]);
     }
     /* shade each vertex of the index range once */
     for (GLsizei i = 0; i < count; i++) {
@@ -865,12 +967,14 @@ static void draw(GLenum mode, GLsizei count, const GLuint *idx, GLint first)
         if (g->kind == PK_BATCH) vs_batch(g, va, k, &vo[k - lo]);
         else vs_mesh(&mu, va, k, &vo[k - lo]);
     }
+    if (St.on) { St.vsec += now_sec() - t0; St.tris += count / 3; St.verts += hi - lo + 1; }
     for (GLsizei i = 0; i + 2 < count; i += 3) {
         GLuint a = idx ? idx[i] : (GLuint)(first + i), b = idx ? idx[i + 1] : (GLuint)(first + i + 1),
                c = idx ? idx[i + 2] : (GLuint)(first + i + 2);
         triangle(&t, &fc, &vo[a - lo], &vo[b - lo], &vo[c - lo]);
     }
     free(vo);
+    if (St.on) St.sec += now_sec() - t0;
 }
 
 static void GL_APIENTRY sw_glDrawArrays(GLenum mode, GLint first, GLsizei count) { draw(mode, count, 0, first); }
@@ -905,7 +1009,23 @@ void swgl_install(void)
     PORT_GL_FUNCS(SW_SET)
 #undef SW_SET
     installed = 1;
+    if (getenv("MVC2_SWGL_STATS")) {
+        St.on = 1;
+        St.from = strtol(getenv("MVC2_SWGL_STATS"), 0, 0);
+        atexit(stats_report);
+    }
 }
+
+#ifdef PORT_SWGL
+/* No platform/gl_load.c in this build: the entry points live here. */
+#define PORT_GL_DEF(type, name) type p_##name;
+PORT_GL_FUNCS(PORT_GL_DEF)
+#undef PORT_GL_DEF
+void gl_clear_depth(float d) { swgl_clear_depth(d); }
+int gl_load(int is_es) { (void)is_es; swgl_install(); return 0; }
+int gl_is_es(void) { return 1; }
+const char *gl_shader_header(void) { return ""; }
+#endif
 
 #else /* GL_DIRECT */
 int swgl_active(void) { return 0; }

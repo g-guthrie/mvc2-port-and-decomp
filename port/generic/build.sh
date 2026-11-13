@@ -16,8 +16,16 @@ mkdir -p "$OUT"
 cd "$EM"
 # the mvc2_host link line, with the response file kept
 rm -f mvc2_host.js && ninja -d keeprsp mvc2_host >/dev/null
-emcc -O2 -c "$ROOT/port/generic/mvc2g.c" -o "$OUT/mvc2g.o"
-sed "s#[^ ]*host_main\.c\.o#$OUT/mvc2g.o#" CMakeFiles/mvc2_host.rsp > "$OUT/link.rsp"
+# the entry point, the game's render glue and the renderer on swgl (no GL, no SDL)
+OBJS=
+for f in generic/mvc2g.c host/fe/fe_render.c host/fe/fe_mesh.c host/fe/fe_char.c render/r_gl.c \
+         render/r_char.c render/r_mesh.c render/decode.c render/r_font.c render/swgl.c; do
+    o="$OUT/$(basename "$f" .c).o"
+    emcc -O2 -DPORT_SWGL -I"$ROOT/port/stubs" -I"$ROOT/port/host" -I"$ROOT/port/platform" -I"$EM/glue" \
+        -c "$ROOT/port/$f" -o "$o"
+    OBJS="$OBJS $o"
+done
+sed "s#[^ ]*host_main\.c\.o#$OBJS#" CMakeFiles/mvc2_host.rsp > "$OUT/link.rsp"
 ninja -t commands mvc2_host | tail -1 | sed -e 's/^: && //' -e 's/ && :$//' \
     -e 's/-sNODERAWFS=1/-sSTANDALONE_WASM=1 --no-entry/' -e 's/-sALLOW_MEMORY_GROWTH=1//' \
     -e 's/-sINITIAL_MEMORY=[0-9]*/-sINITIAL_MEMORY=201326592/' -e 's/-sEXIT_RUNTIME=1//' \
@@ -31,6 +39,6 @@ ${CC:-cc} -O1 -w -D_FILE_OFFSET_BITS=64 -I"$W2C" -I. "$ROOT/port/generic/host_w2
     "$W2C/wasm-rt-impl.c" -lm -o mvc2g_native
 if [ -f "$ISO" ]; then
     node "$ROOT/port/generic/run_node.mjs" mvc2g.wasm "$ISO" "$N" > wasm.txt 2> wasm.err
-    ./mvc2g_native "$ISO" "$N" > native.txt 2> native.err
+    ./mvc2g_native "$ISO" "$N" --hash > native.txt 2> native.err
     cmp wasm.txt native.txt && echo "mvc2g: wasm and translated C agree for $N frames"
 fi

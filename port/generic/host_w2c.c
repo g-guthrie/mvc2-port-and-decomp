@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+#define _FILE_OFFSET_BITS 64
 /* Native host for the wasm2c translation of mvc2g: plain C, any CPU. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "mvc2g_w2c.h"
 
 struct w2c_env { FILE *disc; w2c_mvc2g *m; };
@@ -38,21 +41,61 @@ u32 w2c_wasi__snapshot__preview1_fd_write(struct w2c_wasi__snapshot__preview1 *w
 }
 void w2c_wasi__snapshot__preview1_proc_exit(struct w2c_wasi__snapshot__preview1 *w, u32 c) { exit((int)c); }
 
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+/* mvc2g_native DISC FRAMES [--hash] [--mash] [--shot FRAME:FILE.ppm]...
+ * --hash prints the state hash of every frame (the wasm comparison);
+ * --mash presses START and CROSS in turn, which gets from the title into a fight. */
 int main(int argc, char **argv)
 {
     static w2c_mvc2g m;
-    struct w2c_env env = { fopen(argv[1], "rb"), &m };
+    struct w2c_env env = { argc > 1 ? fopen(argv[1], "rb") : 0, &m };
     struct w2c_wasi__snapshot__preview1 wasi = { &m };
-    long i, n = strtol(argv[2], 0, 0);
-    if (!env.disc) return 1;
+    long i, n = argc > 2 ? strtol(argv[2], 0, 0) : 0, shot_at[16];
+    const char *shot_file[16];
+    int hash = 0, mash = 0, nshot = 0, a;
+    double t0, step = 0.0;
+    if (!env.disc) { fprintf(stderr, "usage: %s DISC FRAMES [--hash] [--mash] [--shot FRAME:FILE.ppm]\n", argv[0]); return 1; }
+    for (a = 3; a < argc; a++) {
+        if (!strcmp(argv[a], "--hash")) hash = 1;
+        else if (!strcmp(argv[a], "--mash")) mash = 1;
+        else if (!strcmp(argv[a], "--shot") && a + 1 < argc && nshot < 16) {
+            char *c = strchr(argv[++a], ':');
+            if (c) { shot_at[nshot] = strtol(argv[a], 0, 0); shot_file[nshot++] = c + 1; }
+        }
+    }
     fseeko(env.disc, 0, SEEK_END);
     wasm_rt_init();
     wasm2c_mvc2g_instantiate(&m, &env, &wasi);
     w2c_mvc2g_0x5Finitialize(&m);
     if (w2c_mvc2g_mvc2g_boot(&m, (f64)ftello(env.disc))) return 2;
     for (i = 0; i < n; i++) {
+        if (mash) {
+            int ph = (int)(i % 40);
+            w2c_mvc2g_mvc2g_pad(&m, 0, ph < 4 ? 0x0008 : ph >= 20 && ph < 24 ? 0x4000 : 0);
+        }
+        t0 = now_sec();
         w2c_mvc2g_mvc2g_frame(&m);
-        printf("%ld %08x %06x\n", i, w2c_mvc2g_mvc2g_state_hash(&m), w2c_mvc2g_mvc2g_game_state(&m));
+        step += now_sec() - t0;
+        if (hash)
+            printf("%ld %08x %06x\n", i, w2c_mvc2g_mvc2g_state_hash(&m), w2c_mvc2g_mvc2g_game_state(&m));
+        for (a = 0; a < nshot; a++)
+            if (shot_at[a] == i) {
+                const u8 *px = mem(&m) + w2c_mvc2g_mvc2g_canvas(&m);
+                FILE *f = fopen(shot_file[a], "wb");
+                int k;
+                if (!f) continue;
+                fprintf(f, "P6\n640 480\n255\n");
+                for (k = 0; k < 640 * 480; k++) fwrite(px + 4 * k, 1, 3, f);
+                fclose(f);
+            }
     }
+    fprintf(stderr, "[mvc2g] %ld frames, %.2f ms per frame (game step + drawing), state %06x\n", n,
+            n ? step * 1000.0 / (double)n : 0.0, w2c_mvc2g_mvc2g_game_state(&m));
     return 0;
 }

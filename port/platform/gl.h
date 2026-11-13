@@ -12,10 +12,11 @@
 #ifndef PORT_GL_H
 #define PORT_GL_H
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(PORT_SWGL)
 #include <GLES3/gl3.h>
 #define GL_DIRECT 1
 #else
+/* PORT_SWGL: no GL driver at all; render/swgl.c owns the p_gl* pointers. */
 #define GL_GLES_PROTOTYPES 0
 #include <GLES3/gl3.h>
 #endif
