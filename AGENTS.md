@@ -32,6 +32,11 @@ The port does not need the PS2 compilers or the retail ELF. It needs your
 disc image (`.iso`, or a raw `.bin`) at `private/disc/mvc2.iso`; `private/`
 is ignored.
 
+In a Claude cloud session, pick the `mvc2-port-and-decomp` environment: its
+set-up script runs the installs below at session start (`emsdk` and
+`SDL2-src` land next to the checkout). The disc is never part of an
+environment; it has to be supplied in each new session.
+
 ```sh
 sudo dpkg --add-architecture i386 && sudo apt-get update
 sudo apt-get install -y libsdl2-dev libsdl2-2.0-0:i386 libgl1-mesa-dri:i386 libegl1:i386 \
