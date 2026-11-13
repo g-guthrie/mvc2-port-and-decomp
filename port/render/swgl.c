@@ -197,8 +197,13 @@ static void GL_APIENTRY sw_glClear(GLbitfield mask)
     bounds(&t, &x0, &y0, &x1, &y1);
     if (mask & GL_COLOR_BUFFER_BIT) {
         uint8_t c[4] = { unorm8(G.clear[0]), unorm8(G.clear[1]), unorm8(G.clear[2]), unorm8(G.clear[3]) };
-        for (int y = y0; y < y1; y++) {
+        const int all = G.cmask[0] & G.cmask[1] & G.cmask[2] & G.cmask[3];
+        for (int y = y0; y < y1 && x0 < x1; y++) {
             uint8_t *p = t.c + ((size_t)y * t.w + x0) * 4;
+            if (all && y > y0) { /* every row is the same: copy the first one */
+                memcpy(p, t.c + ((size_t)y0 * t.w + x0) * 4, (size_t)(x1 - x0) * 4);
+                continue;
+            }
             for (int x = x0; x < x1; x++, p += 4)
                 for (int k = 0; k < 4; k++)
                     if (G.cmask[k]) p[k] = c[k];
@@ -206,8 +211,11 @@ static void GL_APIENTRY sw_glClear(GLbitfield mask)
     }
     if ((mask & GL_DEPTH_BUFFER_BIT) && t.z && G.zmask) {
         uint32_t z = depth24(G.clear_z);
-        for (int y = y0; y < y1; y++)
-            for (int x = x0; x < x1; x++) t.z[(size_t)y * t.w + x] = z;
+        for (int y = y0; y < y1 && x0 < x1; y++) {
+            uint32_t *zr = t.z + (size_t)y * t.w + x0;
+            if (y > y0) { memcpy(zr, t.z + (size_t)y0 * t.w + x0, (size_t)(x1 - x0) * sizeof *zr); continue; }
+            for (int x = x0; x < x1; x++) zr[x - x0] = z;
+        }
     }
 }
 
@@ -460,6 +468,11 @@ static void GL_APIENTRY sw_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, 
     Target t = target();
     (void)fmt; (void)ty;
     if (!t.c) return;
+    if (x >= 0 && y >= 0 && w > 0 && x + w <= t.w && y + h <= t.h) { /* inside the target: whole rows */
+        for (int j = 0; j < h; j++)
+            memcpy((uint8_t *)out + (size_t)j * w * 4, t.c + ((size_t)(y + j) * t.w + x) * 4, (size_t)w * 4);
+        return;
+    }
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++) {
             int sx = x + i, sy = y + j;
