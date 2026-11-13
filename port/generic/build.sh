@@ -34,8 +34,8 @@ ninja -t commands mvc2_host | tail -1 | sed -e 's/^: && //' -e 's/ && :$//' \
 sh "$OUT/link.cmd"
 cd "$OUT"
 wasm2c mvc2g.wasm -n mvc2g -o mvc2g_w2c.c
-${CC:-cc} -O1 -w -c mvc2g_w2c.c -o mvc2g_w2c.o
-${CC:-cc} -O1 -w -D_FILE_OFFSET_BITS=64 -I"$W2C" -I. "$ROOT/port/generic/host_w2c.c" mvc2g_w2c.o \
+${CC:-cc} -O2 -w -c mvc2g_w2c.c -o mvc2g_w2c.o
+${CC:-cc} -O2 -w -I"$W2C" -I. "$ROOT/port/generic/host_w2c.c" mvc2g_w2c.o \
     "$W2C/wasm-rt-impl.c" -lm -o mvc2g_native
 if [ -f "$ISO" ]; then
     node "$ROOT/port/generic/run_node.mjs" mvc2g.wasm "$ISO" "$N" > wasm.txt 2> wasm.err

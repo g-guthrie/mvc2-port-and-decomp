@@ -636,7 +636,7 @@ static void vs_mesh(const MeshUni *m, const Vao *va, GLuint idx, VOut *o)
 }
 
 /* ---------------- fragments ---------------- */
-static uint32_t mul255(uint32_t a, uint32_t b) /* round(a * b / 255) */
+static inline uint32_t mul255(uint32_t a, uint32_t b) /* round(a * b / 255) */
 {
     uint32_t t = a * b + 128;
     return (t + (t >> 8)) >> 8;
@@ -647,51 +647,83 @@ static void to_u8(const float f[4], uint8_t o[4])
     for (int k = 0; k < 4; k++) o[k] = unorm8(f[k]);
 }
 
-/* Texel of the batch program (k_fs), 8 bits per channel. */
-static void batch_texel(const FragCtx *c, float u, float v, int row, uint8_t t[4])
+/* What one draw call samples, resolved once: the texture, how to filter and
+ * wrap it, and the palette row base for an index texture. */
+typedef struct {
+    const Tex *t;
+    const Tex *pal;      /* NULL: RGBA texture */
+    int row, linear, cs, ct;
+    int on;              /* 0: no texture (texel = white) */
+    int dead;            /* 1: the texel is always transparent black */
+} Samp;
+
+/* Texel at 16.16 fixed-point texel coordinates (bilinear: already -0.5). */
+static inline void sample_fix(const Samp *sp, int32_t uf, int32_t vf, uint8_t o[4])
 {
-    const Tex *x = c->tex;
-    if (c->mode == 1 && x) sample8(x, 0, 0, x->linear, x->clamp_s, x->clamp_t, u, v, t);
-    else if (c->mode == 2 && x && c->pal) sample8(x, c->pal, row, c->linear, c->clamp, c->clamp, u, v, t);
-    else if (c->mode == 2) t[0] = t[1] = t[2] = t[3] = 0;
-    else t[0] = t[1] = t[2] = t[3] = 255;
+    const Tex *t = sp->t;
+    int i = uf >> 16, j = vf >> 16;
+    if (!sp->linear) {
+        memcpy(o, texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j), 4);
+    } else {
+        const uint8_t *c00, *c10, *c01, *c11;
+        uint32_t a = ((uint32_t)uf >> 8) & 255u, b = ((uint32_t)vf >> 8) & 255u;
+        uint32_t p00, p10, p01, p11, t0, t1, b0, b1, lo;
+        if (i >= 0 && j >= 0 && i + 1 < t->w && j + 1 < t->h && (!sp->pal || t->fmt == 1)) {
+            /* the four texels are inside the texture: no wrapping */
+            const size_t bpp = sp->pal ? 1 : 4;
+            const uint8_t *r0 = t->px + ((size_t)j * t->w + i) * bpp, *r1 = r0 + (size_t)t->w * bpp;
+            if (sp->pal) {
+                const uint8_t *pr = sp->pal->px + (size_t)sp->row * sp->pal->w * 4;
+                c00 = pr + 4 * r0[0]; c10 = pr + 4 * r0[1]; c01 = pr + 4 * r1[0]; c11 = pr + 4 * r1[1];
+            } else {
+                c00 = r0; c10 = r0 + 4; c01 = r1; c11 = r1 + 4;
+            }
+        } else {
+            c00 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j);
+            c10 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i + 1, j);
+            c01 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i, j + 1);
+            c11 = texel8(t, sp->pal, sp->row, sp->cs, sp->ct, i + 1, j + 1);
+        }
+        /* two channels per multiply: x and y lerps on the 0x00FF00FF halves */
+        memcpy(&p00, c00, 4); memcpy(&p10, c10, 4); memcpy(&p01, c01, 4); memcpy(&p11, c11, 4);
+        t0 = (((p00 & 0xFF00FFu) * (256u - a) + (p10 & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
+        t1 = ((((p00 >> 8) & 0xFF00FFu) * (256u - a) + ((p10 >> 8) & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
+        b0 = (((p01 & 0xFF00FFu) * (256u - a) + (p11 & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
+        b1 = ((((p01 >> 8) & 0xFF00FFu) * (256u - a) + ((p11 >> 8) & 0xFF00FFu) * a) >> 8) & 0xFF00FFu;
+        lo = ((t0 * (256u - b) + b0 * b + 0x800080u) >> 8) & 0xFF00FFu;
+        lo |= (t1 * (256u - b) + b1 * b + 0x800080u) & 0xFF00FF00u;
+        memcpy(o, &lo, 4);
+    }
 }
 
-/* The mesh program's fragment shader (k_mfs).  col and fog are in the
- * shader's byte units (colour 128 = 1.0 with a texture).  Returns 0 for a
- * discarded fragment. */
-static int mesh_frag(const FragCtx *c, float u, float v, const float col[4], float fog, uint8_t out[4])
+static void samp_setup(const FragCtx *c, int row, Samp *sp)
 {
-    int o[4];
-    if (c->flags & 32) {
-        uint8_t t[4];
-        int ca = (int)(col[3] * 16.f);
-        if (!c->tex) return 0;
-        if (c->mode == 2) {
-            if (!c->pal) return 0;
-            sample8(c->tex, c->pal, c->palrow, c->linear, c->clamp, c->clamp, u, v, t);
-        } else {
-            sample8(c->tex, 0, 0, c->tex->linear, c->tex->clamp_s, c->tex->clamp_t, u, v, t);
+    memset(sp, 0, sizeof *sp);
+    if (c->kind == PK_BATCH) {
+        if (c->mode == 1 && c->tex) {
+            sp->on = 1; sp->t = c->tex; sp->linear = c->tex->linear; sp->cs = c->tex->clamp_s; sp->ct = c->tex->clamp_t;
+        } else if (c->mode == 2) {
+            if (!c->tex) return; /* white, as the shader's default t */
+            sp->on = 1; sp->t = c->tex; sp->pal = c->pal; sp->row = row; sp->linear = c->linear;
+            sp->cs = sp->ct = c->clamp;
+            if (!c->pal || (unsigned)row >= (unsigned)c->pal->h) sp->dead = 1;
         }
-        if (t[3] * ca < 255 * 16) return 0;         /* GS TEST alpha != 0 */
-        o[3] = (t[3] * ca) >> 11;
-        for (int k = 0; k < 3; k++) o[k] = (t[k] * (int)(col[k] * 16.f)) >> 11; /* t * col / 128 */
-    } else {
-        if (col[3] < 1.f) return 0;
-        o[0] = (int)(col[0] + 0.5f); o[1] = (int)(col[1] + 0.5f); o[2] = (int)(col[2] + 0.5f);
-        o[3] = (int)(col[3] * (255.f / 128.f) + 0.5f);
+    } else if (c->flags & 32) {
+        sp->on = 1; sp->t = c->tex;
+        if (!c->tex) { sp->dead = 1; return; }
+        if (c->mode == 2) {
+            sp->pal = c->pal; sp->row = c->palrow; sp->linear = c->linear; sp->cs = sp->ct = c->clamp;
+            if (!c->pal || (unsigned)c->palrow >= (unsigned)c->pal->h) sp->dead = 1;
+        } else {
+            sp->linear = c->tex->linear; sp->cs = c->tex->clamp_s; sp->ct = c->tex->clamp_t;
+        }
     }
-    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
-    if (c->flags & 16) {
-        int f = (int)(fog + 0.5f);
-        f = f < 0 ? 0 : f > 255 ? 255 : f;
-        for (int k = 0; k < 3; k++) o[k] = (c->fog8[k] * (255 - f) + o[k] * f + 127) / 255;
-    }
-    out[0] = (uint8_t)o[0]; out[1] = (uint8_t)o[1]; out[2] = (uint8_t)o[2]; out[3] = (uint8_t)o[3];
-    return 1;
+    if (sp->t && (sp->t->w <= 0 || sp->t->h <= 0 || !sp->t->px)) sp->dead = 1;
 }
 
 /* ---------------- output merger ---------------- */
+enum { BL_OFF, BL_ALPHA, BL_ADD, BL_GEN };
+
 static int factor(GLenum f, int sa, int da)
 {
     switch (f) {
@@ -704,17 +736,25 @@ static int factor(GLenum f, int sa, int da)
     }
 }
 
-static void write_pixel(uint8_t *p, const uint8_t s[4])
+static inline void write_pixel(uint8_t *p, const uint8_t s[4], int bl, int allmask)
 {
-    if (!G.blend) {
-        if (G.cmask[0] & G.cmask[1] & G.cmask[2] & G.cmask[3]) memcpy(p, s, 4);
-        else
-            for (int k = 0; k < 4; k++)
-                if (G.cmask[k]) p[k] = s[k];
-        return;
+    if (allmask) {
+        if (bl == BL_OFF) { memcpy(p, s, 4); return; }
+        if (bl == BL_ALPHA) { /* s * sa + d * (1 - sa) */
+            uint32_t sa = s[3], ia = 255u - sa;
+            p[0] = (uint8_t)mul255(s[0], sa) + (uint8_t)mul255(p[0], ia);
+            p[1] = (uint8_t)mul255(s[1], sa) + (uint8_t)mul255(p[1], ia);
+            p[2] = (uint8_t)mul255(s[2], sa) + (uint8_t)mul255(p[2], ia);
+            p[3] = (uint8_t)mul255(s[3], sa) + (uint8_t)mul255(p[3], ia);
+            return;
+        }
+        if (bl == BL_ADD) {
+            for (int k = 0; k < 4; k++) { int r = s[k] + p[k]; p[k] = (uint8_t)(r > 255 ? 255 : r); }
+            return;
+        }
     }
     {
-        int sf = factor(G.bl_s, s[3], p[3]), df = factor(G.bl_d, s[3], p[3]);
+        int sf = bl == BL_OFF ? 255 : factor(G.bl_s, s[3], p[3]), df = bl == BL_OFF ? 0 : factor(G.bl_d, s[3], p[3]);
         for (int k = 0; k < 4; k++) {
             int a = s[k] * sf, b = p[k] * df;
             int r = G.bl_eq == GL_FUNC_SUBTRACT ? a - b : G.bl_eq == GL_FUNC_REVERSE_SUBTRACT ? b - a : a + b;
@@ -724,9 +764,9 @@ static void write_pixel(uint8_t *p, const uint8_t s[4])
     }
 }
 
-static int ztest(uint32_t z, uint32_t old)
+static inline int ztest(GLenum f, uint32_t z, uint32_t old)
 {
-    switch (G.zfunc) {
+    switch (f) {
     case GL_NEVER: return 0;
     case GL_LESS: return z < old;
     case GL_EQUAL: return z == old;
@@ -741,10 +781,24 @@ static int ztest(uint32_t z, uint32_t old)
 /* ---------------- triangles ---------------- */
 typedef struct { double x, y; float z, iw; float v[NVAR]; } SV; /* v = varying / w */
 
+static inline int64_t floor64(double d)
+{
+    int64_t i = (int64_t)d;
+    return (double)i > d ? i - 1 : i;
+}
+
+/* Texel coordinate -> 16.16.  A repeating coordinate is reduced into the
+ * texture first and a clamped one limited to just outside it, so the fixed
+ * point value cannot overflow; `shift` carries the same move to the other
+ * end of the chunk. */
+#define SPAN 16
+#define TEXEL_NUDGE 64 /* 1/1024 texel */
+
 /* Varyings divided by w are linear in screen space.  colour * w and fog * w
  * divided by w are the colour and the fog themselves, so only the texture
- * coordinates need the per-pixel divide (and not even that when w is the
- * same at the three vertices, as it is for every 2D draw). */
+ * coordinates need a divide; that is done at the ends of SPAN-pixel pieces
+ * (once per row when w is the same at the three vertices, as it is for every
+ * 2D draw) and stepped in fixed point between them. */
 static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b, const SV *c, float flat)
 {
     /* 8 sub-pixel bits; edge functions in 64-bit integers */
@@ -753,17 +807,27 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     int64_t x2 = (int64_t)floor(c->x * 256.0 + 0.5), y2 = (int64_t)floor(c->y * 256.0 + 0.5);
     int64_t area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     int bx0, by0, bx1, by1, minx, miny, maxx, maxy;
-    int64_t A0, B0, C0, A1, B1, C1, A2, B2, C2;
-    int tie0, tie1, tie2;
+    int64_t A[3], B[3], C[3];
+    int tie[3];
     double inv;
     const SV *s0 = a, *s1 = b, *s2 = c;
-    const int batch = fc->kind == PK_BATCH, nvar = batch ? 6 : 8, row_pal = (int)flat;
+    const int batch = fc->kind == PK_BATCH, nvar = batch ? 6 : 8;
     const int ui = batch ? 0 : 1, ci = batch ? 2 : 3;
     const int do_z = t->z && G.depth, zwrite = do_z && G.zmask;
-    float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep;
-    int affine, constcol;
+    const GLenum zf = G.zfunc;
+    const int allmask = G.cmask[0] & G.cmask[1] & G.cmask[2] & G.cmask[3];
+    const int bl = !G.blend ? BL_OFF
+                 : G.bl_eq != GL_FUNC_ADD ? BL_GEN
+                 : G.bl_s == GL_SRC_ALPHA && G.bl_d == GL_ONE_MINUS_SRC_ALPHA ? BL_ALPHA
+                 : G.bl_s == GL_ONE && G.bl_d == GL_ONE ? BL_ADD
+                 : G.bl_s == GL_ONE && G.bl_d == GL_ZERO ? BL_OFF : BL_GEN;
+    const int fogged = !batch && (fc->flags & 16);
+    float d1[NVAR], d2[NVAR], step[NVAR], dz1, dz2, zstep, diw1, diw2, iwstep, tw = 1.f, th = 1.f, half = 0.f;
+    int affine, constcol, white = 0;
     uint8_t cc[4] = { 255, 255, 255, 255 };
+    Samp sp;
     if (area == 0) return;
+    if (!batch && (a->v[0] > 0.f || b->v[0] > 0.f || c->v[0] > 0.f)) return; /* ADC: the GS skips this triangle */
     if (area < 0) { /* make it counter-clockwise in the y-up frame */
         int64_t tx = x1, ty = y1;
         x1 = x2; y1 = y2; x2 = tx; y2 = ty;
@@ -785,18 +849,21 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
         maxy = mxy > (int64_t)by1 * 256 ? by1 - 1 : (int)(mxy >> 8);
         if (maxx >= bx1) maxx = bx1 - 1;
         if (maxy >= by1) maxy = by1 - 1;
+        if (minx > maxx || miny > maxy) return;
     }
+    samp_setup(fc, (int)flat, &sp);
+    if (sp.dead && batch) return;            /* alpha 0 everywhere: nothing passes the alpha test */
+    if (sp.dead && !batch) return;
+    if (sp.on) { tw = (float)sp.t->w; th = (float)sp.t->h; half = sp.linear ? 0.5f : 0.f; }
     /* edge i is opposite vertex i: E(x, y) = A x + B y + C, > 0 inside */
-    A0 = y1 - y2; B0 = x2 - x1; C0 = x1 * y2 - x2 * y1;
-    A1 = y2 - y0; B1 = x0 - x2; C1 = x2 * y0 - x0 * y2;
-    A2 = y0 - y1; B2 = x1 - x0; C2 = x0 * y1 - x1 * y0;
+    A[0] = y1 - y2; B[0] = x2 - x1; C[0] = x1 * y2 - x2 * y1;
+    A[1] = y2 - y0; B[1] = x0 - x2; C[1] = x2 * y0 - x0 * y2;
+    A[2] = y0 - y1; B[2] = x1 - x0; C[2] = x0 * y1 - x1 * y0;
     /* top-left rule (y up): a zero edge counts when it is a left edge or a top edge */
-    tie0 = A0 > 0 || (A0 == 0 && B0 < 0);
-    tie1 = A1 > 0 || (A1 == 0 && B1 < 0);
-    tie2 = A2 > 0 || (A2 == 0 && B2 < 0);
+    for (int k = 0; k < 3; k++) tie[k] = A[k] > 0 || (A[k] == 0 && B[k] < 0);
     inv = 1.0 / (double)area;
     /* X(px, py) = X0 + w1 (X1 - X0) + w2 (X2 - X0); one pixel to the right adds `step` */
-#define GRAD(D1, D2) (float)(256.0 * inv * ((double)A1 * (double)(D1) + (double)A2 * (double)(D2)))
+#define GRAD(D1, D2) (float)(256.0 * inv * ((double)A[1] * (double)(D1) + (double)A[2] * (double)(D2)))
     for (int k = 0; k < nvar; k++) {
         d1[k] = s1->v[k] - s0->v[k];
         d2[k] = s2->v[k] - s0->v[k];
@@ -808,71 +875,153 @@ static void raster(const Target *t, const FragCtx *fc, const SV *a, const SV *b,
     affine = diw1 == 0.f && diw2 == 0.f;
     constcol = batch && d1[2] == 0.f && d2[2] == 0.f && d1[3] == 0.f && d2[3] == 0.f && d1[4] == 0.f &&
                d2[4] == 0.f && d1[5] == 0.f && d2[5] == 0.f;
-    if (constcol) to_u8(&s0->v[2], cc);
+    if (constcol) {
+        to_u8(&s0->v[2], cc);
+        white = (cc[0] & cc[1] & cc[2] & cc[3]) == 255;
+        if (!cc[3]) return; /* alpha 0: fails the alpha test */
+    }
 
     for (int py = miny; py <= maxy; py++) {
-        int64_t sy = (int64_t)py * 256 + 128, sx = (int64_t)minx * 256 + 128;
-        int64_t e0 = A0 * sx + B0 * sy + C0, e1 = A1 * sx + B1 * sy + C1, e2 = A2 * sx + B2 * sy + C2;
-        uint8_t *row = t->c + (size_t)py * t->w * 4;
-        uint32_t *zrow = do_z ? t->z + (size_t)py * t->w : 0;
-        float z = 0.f, iw = 0.f, var[NVAR];
-        int started = 0, xs = minx, xe = maxx;
-        /* the pixels of this row where every edge function is >= 0 */
-        {
-            const int64_t ev[3] = { e0, e1, e2 }, av[3] = { A0 * 256, A1 * 256, A2 * 256 };
-            int empty = 0;
-            for (int k = 0; k < 3; k++) {
-                if (av[k] > 0) {
-                    if (ev[k] < 0) { int64_t n = (-ev[k] + av[k] - 1) / av[k]; if (minx + n > xs) xs = n > maxx - minx ? maxx + 1 : (int)(minx + n); }
-                } else if (av[k] < 0) {
-                    if (ev[k] < 0) empty = 1;
-                    else { int64_t n = ev[k] / -av[k]; if (minx + n < xe) xe = (int)(minx + n); }
-                } else if (ev[k] < 0) {
-                    empty = 1;
-                }
+        const int64_t sy = (int64_t)py * 256 + 128, sx = (int64_t)minx * 256 + 128;
+        int xs = minx, xe = maxx, empty = 0;
+        uint8_t *row;
+        uint32_t *zrow;
+        double w1, w2;
+        float z, iw, var[NVAR];
+        int64_t zfix, zfstep;
+        int32_t cfix[5] = { 0, 0, 0, 0, 0 }, cstep[5] = { 0, 0, 0, 0, 0 }; /* colour (and fog), 16.16 */
+        int px;
+        /* the pixels of this row inside the three edges */
+        for (int k = 0; k < 3; k++) {
+            const int64_t e = A[k] * sx + B[k] * sy + C[k], st = A[k] * 256;
+            if (st > 0) {           /* a left edge: inside from some x on */
+                int64_t n = e >= 0 ? 0 : (-e + st - 1) / st;        /* first n with e + n st >= 0 */
+                if (!tie[k] && e + n * st == 0) n++;
+                if (n > maxx - minx) { empty = 1; break; }
+                if (minx + (int)n > xs) xs = minx + (int)n;
+            } else if (st < 0) {    /* a right edge: inside up to some x */
+                int64_t n;
+                if (e < 0) { empty = 1; break; }
+                n = e / -st;                                         /* last n with e + n st >= 0 */
+                if (!tie[k] && e + n * st == 0) n--;
+                if (n < 0) { empty = 1; break; }
+                if (minx + n < xe) xe = (int)(minx + n);
+            } else if (e < 0 || (e == 0 && !tie[k])) {
+                empty = 1; break;
             }
-            if (empty || xs > xe) continue;
-            e0 += A0 * 256 * (xs - minx); e1 += A1 * 256 * (xs - minx); e2 += A2 * 256 * (xs - minx);
         }
-        for (int px = xs; px <= xe; px++, e0 += A0 * 256, e1 += A1 * 256, e2 += A2 * 256) {
-            uint32_t zi = 0;
-            uint8_t out[4];
-            float u, v;
-            if (e0 < 0 || e1 < 0 || e2 < 0 || (e0 == 0 && !tie0) || (e1 == 0 && !tie1) || (e2 == 0 && !tie2)) {
-                if (started) break; /* convex: the span has ended */
-                continue;
+        if (empty || xs > xe) continue;
+        {
+            const int64_t sxs = (int64_t)xs * 256 + 128;
+            w1 = (double)(A[1] * sxs + B[1] * sy + C[1]) * inv;
+            w2 = (double)(A[2] * sxs + B[2] * sy + C[2]) * inv;
+        }
+        z = s0->z + (float)(w1 * (double)dz1 + w2 * (double)dz2);
+        iw = s0->iw + (float)(w1 * (double)diw1 + w2 * (double)diw2);
+        for (int k = 0; k < nvar; k++) var[k] = s0->v[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
+        /* depth: 24.32 fixed point, so the first pixel is depth24(z) exactly */
+        {
+            double zq = (double)(z <= 0.f ? 0.f : z >= 1.f ? 1.f : z) * 16777215.0 + 0.5;
+            zfix = (int64_t)(zq * 4294967296.0);
+            zfstep = (int64_t)((double)zstep * 16777215.0 * 4294967296.0);
+        }
+        if (batch) {
+            if (!constcol)
+                for (int k = 0; k < 4; k++) {
+                    cfix[k] = (int32_t)(var[2 + k] * (255.f * 65536.f)) + 32768;
+                    cstep[k] = (int32_t)(step[2 + k] * (255.f * 65536.f));
+                }
+        } else {
+            for (int k = 0; k < 4; k++) {
+                cfix[k] = (int32_t)(var[ci + k] * 65536.f);
+                cstep[k] = (int32_t)(step[ci + k] * 65536.f);
             }
-            if (!started) {
-                double w1 = (double)e1 * inv, w2 = (double)e2 * inv;
-                z = s0->z + (float)(w1 * (double)dz1 + w2 * (double)dz2);
-                iw = s0->iw + (float)(w1 * (double)diw1 + w2 * (double)diw2);
-                for (int k = 0; k < nvar; k++) var[k] = s0->v[k] + (float)(w1 * (double)d1[k] + w2 * (double)d2[k]);
-                started = 1;
-            } else {
-                z += zstep; iw += iwstep;
-                for (int k = 0; k < nvar; k++) var[k] += step[k];
+            cfix[4] = (int32_t)(var[7] * 65536.f) + 32768;
+            cstep[4] = (int32_t)(step[7] * 65536.f);
+        }
+        row = t->c + ((size_t)py * t->w + xs) * 4;
+        zrow = do_z ? t->z + (size_t)py * t->w + xs : 0;
+        px = xs;
+        while (px <= xe) {
+            /* one piece: texture coordinates exact at both ends, linear between */
+            const int len = affine || !sp.on ? xe - px + 1 : (xe - px + 1 < SPAN ? xe - px + 1 : SPAN);
+            int32_t uf = 0, vf = 0, duf = 0, dvf = 0;
+            if (sp.on) {
+                const float wa = 1.f / iw, iwb = iw + iwstep * (float)len, wb = affine ? wa : 1.f / iwb;
+                double ua = (double)(var[ui] * wa * tw - half), va = (double)(var[ui + 1] * wa * th - half);
+                double ub = (double)((var[ui] + step[ui] * (float)len) * wb * tw - half);
+                double vb = (double)((var[ui + 1] + step[ui + 1] * (float)len) * wb * th - half);
+                double su, sv;
+                if (sp.cs) { ua = ua < -4.0 ? -4.0 : ua > tw + 4.0 ? tw + 4.0 : ua; ub = ub < -4.0 ? -4.0 : ub > tw + 4.0 ? tw + 4.0 : ub; }
+                else { su = (double)floor64(ua / tw) * tw; ua -= su; ub -= su; }
+                if (sp.ct) { va = va < -4.0 ? -4.0 : va > th + 4.0 ? th + 4.0 : va; vb = vb < -4.0 ? -4.0 : vb > th + 4.0 ? th + 4.0 : vb; }
+                else { sv = (double)floor64(va / th) * th; va -= sv; vb -= sv; }
+                if (ub - ua > 16000.0 || ua - ub > 16000.0) ub = ua;
+                if (vb - va > 16000.0 || va - vb > 16000.0) vb = va;
+                /* + TEXEL_NUDGE: a coordinate that float rounding left a hair below a
+                 * texel edge takes the texel it was aimed at (sprites drawn 1:1) */
+                uf = (int32_t)floor64(ua * 65536.0) + TEXEL_NUDGE; vf = (int32_t)floor64(va * 65536.0) + TEXEL_NUDGE;
+                duf = (int32_t)(floor64(ub * 65536.0) - uf) / len;
+                dvf = (int32_t)(floor64(vb * 65536.0) - vf) / len;
             }
-            if (do_z) {
-                zi = depth24(z);
-                if (!ztest(zi, zrow[px])) continue;
+            for (int i = 0; i < len; i++, row += 4, uf += duf, vf += dvf, zfix += zfstep, cfix[0] += cstep[0],
+                     cfix[1] += cstep[1], cfix[2] += cstep[2], cfix[3] += cstep[3], cfix[4] += cstep[4]) {
+                uint32_t zi = 0;
+                uint8_t tx[4], out[4];
+                if (do_z) {
+                    zi = zfix <= 0 ? 0 : (uint32_t)(zfix >> 32);
+                    if (zi > 0xFFFFFFu) zi = 0xFFFFFFu;
+                    if (!ztest(zf, zi, zrow[i])) continue;
+                }
+                if (sp.on) sample_fix(&sp, uf, vf, tx);
+                else tx[0] = tx[1] = tx[2] = tx[3] = 255;
+                if (batch) {
+                    if (white) {
+                        if (!tx[3]) continue; /* GS TEST: alpha != 0 */
+                        memcpy(out, tx, 4);
+                    } else {
+                        if (!constcol)
+                            for (int k = 0; k < 4; k++) {
+                                int v = cfix[k] >> 16;
+                                cc[k] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                            }
+                        out[3] = (uint8_t)mul255(tx[3], cc[3]);
+                        if (!out[3]) continue;
+                        out[0] = (uint8_t)mul255(tx[0], cc[0]);
+                        out[1] = (uint8_t)mul255(tx[1], cc[1]);
+                        out[2] = (uint8_t)mul255(tx[2], cc[2]);
+                    }
+                } else {
+                    /* k_mfs: colour in byte units, 128 = 1.0 with a texture */
+                    int o[4];
+                    if (sp.on) {
+                        const int ca = cfix[3] >> 12; /* colour * 16 */
+                        if (tx[3] * ca < 255 * 16) continue;
+                        o[3] = (tx[3] * ca) >> 11;
+                        o[0] = (tx[0] * (cfix[0] >> 12)) >> 11;
+                        o[1] = (tx[1] * (cfix[1] >> 12)) >> 11;
+                        o[2] = (tx[2] * (cfix[2] >> 12)) >> 11;
+                    } else {
+                        if (cfix[3] < 65536) continue;
+                        o[0] = (cfix[0] + 32768) >> 16; o[1] = (cfix[1] + 32768) >> 16; o[2] = (cfix[2] + 32768) >> 16;
+                        o[3] = (int)(((int64_t)cfix[3] * 255 / 128 + 32768) >> 16);
+                    }
+                    for (int k = 0; k < 4; k++) o[k] = o[k] < 0 ? 0 : o[k] > 255 ? 255 : o[k];
+                    if (fogged) {
+                        int f = cfix[4] >> 16;
+                        f = f < 0 ? 0 : f > 255 ? 255 : f;
+                        for (int k = 0; k < 3; k++) o[k] = (fc->fog8[k] * (255 - f) + o[k] * f + 127) / 255;
+                    }
+                    out[0] = (uint8_t)o[0]; out[1] = (uint8_t)o[1]; out[2] = (uint8_t)o[2]; out[3] = (uint8_t)o[3];
+                }
+                if (zwrite) zrow[i] = zi;
+                write_pixel(row, out, bl, allmask);
             }
-            if (affine) { float w = 1.f / s0->iw; u = var[ui] * w; v = var[ui + 1] * w; }
-            else { float w = 1.f / iw; u = var[ui] * w; v = var[ui + 1] * w; }
-            if (batch) {
-                uint8_t tx[4];
-                batch_texel(fc, u, v, row_pal, tx);
-                if (!constcol) to_u8(&var[2], cc);
-                out[3] = (uint8_t)mul255(tx[3], cc[3]);
-                if (!out[3]) continue; /* GS TEST: alpha != 0 */
-                out[0] = (uint8_t)mul255(tx[0], cc[0]);
-                out[1] = (uint8_t)mul255(tx[1], cc[1]);
-                out[2] = (uint8_t)mul255(tx[2], cc[2]);
-            } else {
-                if (var[0] > 0.f) continue; /* ADC */
-                if (!mesh_frag(fc, u, v, &var[ci], var[7], out)) continue;
-            }
-            if (zwrite) zrow[px] = zi;
-            write_pixel(row + (size_t)px * 4, out);
+            if (zrow) zrow += len;
+            px += len;
+            iw += iwstep * (float)len;
+            var[ui] += step[ui] * (float)len;
+            var[ui + 1] += step[ui + 1] * (float)len;
         }
     }
 }
