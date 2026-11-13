@@ -17,11 +17,28 @@ u32 w2c_env_0x5F_syscall_getdents64(struct w2c_env *e, u32 a, u32 b, u32 c) { re
 u32 w2c_env_0x5F_syscall_rmdir(struct w2c_env *e, u32 a) { return (u32)-1; }
 u32 w2c_env_0x5F_syscall_unlinkat(struct w2c_env *e, u32 a, u32 b, u32 c) { return (u32)-1; }
 u32 w2c_env_emscripten_asm_const_int(struct w2c_env *e, u32 a, u32 b, u32 c) { return 0; }
+#ifdef MVC2G_EMBED_DISC
+/* Personal build: the disc image is part of the program (-DMVC2G_EMBED_DISC='"path"'),
+ * so the host needs no file access.  The result contains the game: it is for
+ * the owner of the disc only and is never committed or shared. */
+__asm__(".section .rodata\n.global mvc2g_disc\nmvc2g_disc:\n.incbin \"" MVC2G_EMBED_DISC "\"\n"
+        ".global mvc2g_disc_end\nmvc2g_disc_end:\n.previous\n");
+extern const unsigned char mvc2g_disc[], mvc2g_disc_end[];
+u32 w2c_env_page_disc_read(struct w2c_env *e, f64 off, u32 n, u32 dst)
+{
+    const size_t size = (size_t)(mvc2g_disc_end - mvc2g_disc), o = (size_t)off;
+    if (o >= size) return 0;
+    if (n > size - o) n = (u32)(size - o);
+    memcpy(mem(e->m) + dst, mvc2g_disc + o, n);
+    return n;
+}
+#else
 u32 w2c_env_page_disc_read(struct w2c_env *e, f64 off, u32 n, u32 dst)
 {
     fseeko(e->disc, (off_t)off, SEEK_SET);
     return (u32)fread(mem(e->m) + dst, 1, n, e->disc);
 }
+#endif
 u32 w2c_wasi__snapshot__preview1_clock_time_get(struct w2c_wasi__snapshot__preview1 *w, u32 id, u64 prec, u32 out) { memset(mem(w->m) + out, 0, 8); return 0; }
 u32 w2c_wasi__snapshot__preview1_environ_get(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b) { return 0; }
 u32 w2c_wasi__snapshot__preview1_environ_sizes_get(struct w2c_wasi__snapshot__preview1 *w, u32 a, u32 b) { wr32(mem(w->m) + a, 0); wr32(mem(w->m) + b, 0); return 0; }
@@ -66,16 +83,24 @@ static void wav_header(FILE *f, unsigned bytes)
 int main(int argc, char **argv)
 {
     static w2c_mvc2g m;
+#ifdef MVC2G_EMBED_DISC
+    struct w2c_env env = { 0, &m };
+    const int a0 = 1; /* no DISC argument */
+#else
     struct w2c_env env = { argc > 1 ? fopen(argv[1], "rb") : 0, &m };
+    const int a0 = 2;
+#endif
     struct w2c_wasi__snapshot__preview1 wasi = { &m };
-    long i, n = argc > 2 ? strtol(argv[2], 0, 0) : 0, shot_at[16];
+    long i, n = argc > a0 ? strtol(argv[a0], 0, 0) : 0, shot_at[16];
     const char *shot_file[16];
     int hash = 0, mash = 0, nshot = 0, a;
     FILE *wav = 0;
     unsigned wav_bytes = 0;
-    double t0, step = 0.0;
-    if (!env.disc) { fprintf(stderr, "usage: %s DISC FRAMES [--hash] [--mash] [--shot FRAME:FILE.ppm]\n", argv[0]); return 1; }
-    for (a = 3; a < argc; a++) {
+    double t0, step = 0.0, disc_size;
+#ifndef MVC2G_EMBED_DISC
+    if (!env.disc) { fprintf(stderr, "usage: %s DISC FRAMES [--hash] [--mash] [--wav FILE.wav] [--shot FRAME:FILE.ppm]\n", argv[0]); return 1; }
+#endif
+    for (a = a0 + 1; a < argc; a++) {
         if (!strcmp(argv[a], "--hash")) hash = 1;
         else if (!strcmp(argv[a], "--mash")) mash = 1;
         else if (!strcmp(argv[a], "--wav") && a + 1 < argc) { wav = fopen(argv[++a], "wb"); if (wav) wav_header(wav, 0); }
@@ -84,11 +109,16 @@ int main(int argc, char **argv)
             if (c) { shot_at[nshot] = strtol(argv[a], 0, 0); shot_file[nshot++] = c + 1; }
         }
     }
+#ifdef MVC2G_EMBED_DISC
+    disc_size = (double)(mvc2g_disc_end - mvc2g_disc);
+#else
     fseeko(env.disc, 0, SEEK_END);
+    disc_size = (double)ftello(env.disc);
+#endif
     wasm_rt_init();
     wasm2c_mvc2g_instantiate(&m, &env, &wasi);
     w2c_mvc2g_0x5Finitialize(&m);
-    if (w2c_mvc2g_mvc2g_boot(&m, (f64)ftello(env.disc))) return 2;
+    if (w2c_mvc2g_mvc2g_boot(&m, disc_size)) return 2;
     for (i = 0; i < n; i++) {
         if (mash) {
             int ph = (int)(i % 40);

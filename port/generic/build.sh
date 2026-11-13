@@ -40,6 +40,14 @@ wasm2c mvc2g.wasm -n mvc2g -o mvc2g_w2c.c
 ${CC:-cc} -O2 -w -c mvc2g_w2c.c -o mvc2g_w2c.o
 ${CC:-cc} -O2 -w -I"$W2C" -I. "$ROOT/port/generic/host_w2c.c" mvc2g_w2c.o \
     "$W2C/wasm-rt-impl.c" -lm -o mvc2g_native
+# EMBED=1: also a personal build with the disc inside (no file access needed).
+# It contains the game, so it goes to private/ and is never committed or shared.
+if [ -n "$EMBED" ] && [ -f "$ISO" ]; then
+    mkdir -p "$ROOT/private/generic"
+    ${CC:-cc} -O2 -w -I"$W2C" -I. -DMVC2G_EMBED_DISC="\"$ISO\"" "$ROOT/port/generic/host_w2c.c" mvc2g_w2c.o \
+        "$W2C/wasm-rt-impl.c" -lm -o "$ROOT/private/generic/mvc2g_personal"
+    echo "mvc2g: personal build with the disc inside: private/generic/mvc2g_personal"
+fi
 if [ -f "$ISO" ]; then
     node "$ROOT/port/generic/run_node.mjs" mvc2g.wasm "$ISO" "$N" > wasm.txt 2> wasm.err
     ./mvc2g_native "$ISO" "$N" --hash > native.txt 2> native.err
